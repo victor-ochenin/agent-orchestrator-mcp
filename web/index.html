@@ -193,7 +193,7 @@
     </div>
     <div class="card-body">
       <table>
-        <thead><tr><th>ID</th><th>Заголовок</th><th>Приоритет</th><th>Статус</th><th>Агент</th><th>Результат</th></tr></thead>
+        <thead><tr><th>ID</th><th>Заголовок</th><th>Приоритет</th><th>Статус</th><th>Агент</th></tr></thead>
         <tbody id="tasks-body"></tbody>
       </table>
       <div id="tasks-empty" class="empty" style="display:none">Нет задач</div>
@@ -203,7 +203,7 @@
   <!-- Messages Log -->
   <div class="card full-width">
     <div class="card-header">
-      <h2>📡 Лента активности</h2>
+      <h2>Сообщения оркестратора</h2>
       <div style="display:flex;gap:6px">
         <button class="btn btn-sm" onclick="clearMessages()">Очистить</button>
         <button class="btn btn-sm" onclick="refreshAll()">Обновить</button>
@@ -309,39 +309,36 @@ async function refreshAll() {
         <td>${priorityLabel(t.priority)}</td>
         <td>${statusBadge(t.status)}</td>
         <td class="mono">${t.assigned_to || '—'}</td>
-        <td class="truncate" title="${t.result || ''}">${t.result || '—'}</td>
       </tr>`).join('');
     }
 
     // Messages - Activity Feed (orchestrator messages only)
     const feed = document.getElementById('activity-feed');
-    const orchestratorMsgs = messages.filter(m => 
-      m.from_agent === 'orchestrator' || m.to_agent === 'orchestrator' || !m.from_agent
+    const orchestratorMsgs = messages.filter(m =>
+      m.from_agent === 'orchestrator'
     );
     feed.innerHTML = orchestratorMsgs.map(m => {
-      const from = m.from_agent || '<system>';
-      const to = m.to_agent ? `→ <strong>${m.to_agent}</strong>` : '<span style="color:var(--purple)">→ broadcast</span>';
-      const isOutgoing = m.from_agent === 'orchestrator';
-      const bgColor = isOutgoing ? 'rgba(59,130,246,.1)' : 'var(--surface2)';
-      const borderColor = isOutgoing ? 'var(--accent)' : 'var(--border)';
+      const toName = m.to_agent_name || m.to_agent || 'broadcast';
+      const to = m.to_agent ? `→ <strong>${toName}</strong>` : '<span style="color:var(--purple)">→ broadcast</span>';
+      const bgColor = 'rgba(59,130,246,.1)';
+      const borderColor = 'var(--accent)';
       return `<div style="margin-bottom:8px;padding:8px 12px;background:${bgColor};border-left:3px solid ${borderColor};border-radius:6px">
         <span class="time-ago">${timeAgo(m.timestamp)}</span>
-        &nbsp; <strong style="color:var(--accent)">${from}</strong> ${to}<br>
-        <span style="color:var(--text);font-size:13px">${m.content}</span>
-        ${m.task_id ? `<br><span class="mono" style="color:var(--text-dim);font-size:11px">task: ${m.task_id}</span>` : ''}
+        &nbsp; <strong style="color:var(--accent)">orchestrator</strong> ${to}<br>
+        <span style="color:var(--text);font-size:13px;white-space:pre-wrap">${m.content}</span>
       </div>`;
     }).join('') || '<div class="empty">Нет сообщений</div>';
 
     // Messages - All messages
     const ml = document.getElementById('messages-log');
     ml.innerHTML = messages.map(m => {
-      const from = m.from_agent || '<system>';
-      const to = m.to_agent ? `→ <strong>${m.to_agent}</strong>` : '<span style="color:var(--purple)">→ broadcast</span>';
+      const fromName = m.from_agent_name || m.from_agent || '<system>';
+      const toName = m.to_agent_name || m.to_agent || 'broadcast';
+      const to = m.to_agent ? `→ <strong>${toName}</strong>` : '<span style="color:var(--purple)">→ broadcast</span>';
       return `<div style="margin-bottom:8px;padding:8px 12px;background:var(--surface2);border-radius:6px">
         <span class="time-ago">${timeAgo(m.timestamp)}</span>
-        &nbsp; <strong style="color:var(--accent)">${from}</strong> ${to}<br>
+        &nbsp; <strong style="color:var(--accent)">${fromName}</strong> ${to}<br>
         ${m.content}
-        ${m.task_id ? `<br><span class="mono" style="color:var(--text-dim);font-size:11px">task: ${m.task_id}</span>` : ''}
       </div>`;
     }).join('');
 
@@ -375,22 +372,22 @@ async function showAgentMessages(agentId) {
     } else {
       content.innerHTML = msgs.map(m => {
         const isFromAgent = m.from_agent === agentId;
-        const isToAgent = m.to_agent === agentId;
         const bgColor = isFromAgent ? 'rgba(34,197,94,.1)' : 'var(--surface2)';
         const borderColor = isFromAgent ? 'var(--green)' : 'var(--accent)';
         const arrow = isFromAgent ? '📤 От агента' : '📥 К агенту';
-        
+        const fromName = m.from_agent_name || m.from_agent || '<system>';
+        const toName = m.to_agent_name || m.to_agent || 'broadcast';
+
         return `<div style="margin-bottom:12px;padding:10px 14px;background:${bgColor};border-left:3px solid ${borderColor};border-radius:6px">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
             <span class="time-ago">${timeAgo(m.timestamp)}</span>
             <span style="font-size:11px;color:var(--text-dim)">${arrow}</span>
           </div>
           <div style="margin-bottom:4px">
-            <strong style="color:var(--accent)">${m.from_agent || '<system>'}</strong> 
-            → <strong>${m.to_agent || 'broadcast'}</strong>
+            <strong style="color:var(--accent)">${fromName}</strong>
+            → <strong>${toName}</strong>
           </div>
           <div style="color:var(--text);font-size:13px;white-space:pre-wrap">${m.content}</div>
-          ${m.task_id ? `<div class="mono" style="color:var(--text-dim);font-size:11px;margin-top:4px">task: ${m.task_id}</div>` : ''}
         </div>`;
       }).join('');
     }

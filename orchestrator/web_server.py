@@ -144,11 +144,19 @@ class DashboardAPI(SimpleHTTPRequestHandler):
     def _clear_tasks(self):
         tasks_file = STATE_DIR / "tasks.json"
         _write_json(tasks_file, [])
+        # Also clear in-memory task manager if available
+        if self.task_manager:
+            self.task_manager._tasks.clear()
+            self.task_manager._save()
         return {"ok": True, "cleared": "tasks"}
 
     def _clear_messages(self):
         msgs_file = STATE_DIR / "messages.json"
         _write_json(msgs_file, [])
+        # Also clear in-memory message bus if available
+        if self.message_bus:
+            self.message_bus._messages.clear()
+            self.message_bus._save()
         return {"ok": True, "cleared": "messages"}
 
     def _update_task_status(self, data):

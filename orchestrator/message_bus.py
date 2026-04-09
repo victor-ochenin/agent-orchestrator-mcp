@@ -16,6 +16,8 @@ class Message:
     content: str
     timestamp: float = field(default_factory=time.time)
     task_id: Optional[str] = None
+    from_agent_name: Optional[str] = None  # Human-readable name
+    to_agent_name: Optional[str] = None  # Human-readable name
 
 
 class MessageBus:
@@ -52,6 +54,8 @@ class MessageBus:
         from_agent: Optional[str] = None,
         to_agent: Optional[str] = None,
         task_id: Optional[str] = None,
+        from_agent_name: Optional[str] = None,
+        to_agent_name: Optional[str] = None,
     ) -> Message:
         """Send a message."""
         msg = Message(
@@ -60,6 +64,8 @@ class MessageBus:
             to_agent=to_agent,
             content=content,
             task_id=task_id,
+            from_agent_name=from_agent_name,
+            to_agent_name=to_agent_name,
         )
         self._messages.append(msg)
         self._save()
