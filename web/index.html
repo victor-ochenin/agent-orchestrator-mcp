@@ -176,7 +176,7 @@
     </div>
     <div class="card-body">
       <table>
-        <thead><tr><th>ID</th><th>Имя</th><th>Команда</th><th>PID</th><th>Статус</th><th>Задача</th></tr></thead>
+        <thead><tr><th>ID</th><th>Имя</th><th>PID</th><th>Статус</th><th>Задача</th><th>Действия</th></tr></thead>
         <tbody id="agents-body"></tbody>
       </table>
       <div id="agents-empty" class="empty" style="display:none">Нет запущенных агентов</div>
@@ -203,7 +203,21 @@
   <!-- Messages Log -->
   <div class="card full-width">
     <div class="card-header">
-      <h2>💬 Сообщения</h2>
+      <h2>📡 Лента активности</h2>
+      <div style="display:flex;gap:6px">
+        <button class="btn btn-sm" onclick="clearMessages()">Очистить</button>
+        <button class="btn btn-sm" onclick="refreshAll()">Обновить</button>
+      </div>
+    </div>
+    <div class="card-body">
+      <div class="log-area" id="activity-feed"></div>
+    </div>
+  </div>
+
+  <!-- Messages Log -->
+  <div class="card full-width">
+    <div class="card-header">
+      <h2>💬 Все сообщения</h2>
       <div style="display:flex;gap:6px">
         <button class="btn btn-sm" onclick="clearMessages()">Очистить</button>
         <button class="btn btn-sm" onclick="refreshAll()">Обновить</button>
@@ -211,6 +225,19 @@
     </div>
     <div class="card-body">
       <div class="log-area" id="messages-log"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Agent Messages Modal -->
+<div id="agent-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.7);z-index:1000;justify-content:center;align-items:center">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;max-width:800px;width:90%;max-height:80vh;overflow:hidden;display:flex;flex-direction:column">
+    <div class="card-header">
+      <h2 id="modal-title">💬 Сообщения агента</h2>
+      <button class="btn btn-sm" onclick="closeModal()">✕ Закрыть</button>
+    </div>
+    <div class="card-body" style="overflow-y:auto;max-height:70vh;padding:16px">
+      <div id="agent-messages-content"></div>
     </div>
   </div>
 </div>
@@ -263,10 +290,10 @@ async function refreshAll() {
       ab.innerHTML = agents.map(a => `<tr>
         <td class="mono">${a.id}</td>
         <td>${a.name}</td>
-        <td class="mono">${a.command} ${a.args.join(' ')}</td>
         <td class="mono">${a.pid || '—'}</td>
         <td>${a.status === 'running' ? '<span class="pulse pulse-green"></span>' : '<span class="pulse pulse-yellow"></span>'} ${statusBadge(a.status)}</td>
         <td class="mono">${a.current_task || '—'}</td>
+        <td><button class="btn btn-sm" onclick="showAgentMessages('${a.id}')">💬 Сообщения</button></td>
       </tr>`).join('');
     }
 
@@ -286,7 +313,26 @@ async function refreshAll() {
       </tr>`).join('');
     }
 
-    // Messages
+    // Messages - Activity Feed (orchestrator messages only)
+    const feed = document.getElementById('activity-feed');
+    const orchestratorMsgs = messages.filter(m => 
+      m.from_agent === 'orchestrator' || m.to_agent === 'orchestrator' || !m.from_agent
+    );
+    feed.innerHTML = orchestratorMsgs.map(m => {
+      const from = m.from_agent || '<system>';
+      const to = m.to_agent ? `→ <strong>${m.to_agent}</strong>` : '<span style="color:var(--purple)">→ broadcast</span>';
+      const isOutgoing = m.from_agent === 'orchestrator';
+      const bgColor = isOutgoing ? 'rgba(59,130,246,.1)' : 'var(--surface2)';
+      const borderColor = isOutgoing ? 'var(--accent)' : 'var(--border)';
+      return `<div style="margin-bottom:8px;padding:8px 12px;background:${bgColor};border-left:3px solid ${borderColor};border-radius:6px">
+        <span class="time-ago">${timeAgo(m.timestamp)}</span>
+        &nbsp; <strong style="color:var(--accent)">${from}</strong> ${to}<br>
+        <span style="color:var(--text);font-size:13px">${m.content}</span>
+        ${m.task_id ? `<br><span class="mono" style="color:var(--text-dim);font-size:11px">task: ${m.task_id}</span>` : ''}
+      </div>`;
+    }).join('') || '<div class="empty">Нет сообщений</div>';
+
+    // Messages - All messages
     const ml = document.getElementById('messages-log');
     ml.innerHTML = messages.map(m => {
       const from = m.from_agent || '<system>';
@@ -315,6 +361,59 @@ async function clearMessages() {
   await fetch(`${API}/messages/clear`, { method: 'POST' });
   refreshAll();
 }
+
+async function showAgentMessages(agentId) {
+  try {
+    const res = await fetch(`${API}/messages/agent/${agentId}`);
+    const msgs = await res.json();
+    
+    document.getElementById('modal-title').textContent = `💬 Сообщения агента ${agentId}`;
+    const content = document.getElementById('agent-messages-content');
+    
+    if (msgs.length === 0) {
+      content.innerHTML = '<div class="empty">Нет сообщений</div>';
+    } else {
+      content.innerHTML = msgs.map(m => {
+        const isFromAgent = m.from_agent === agentId;
+        const isToAgent = m.to_agent === agentId;
+        const bgColor = isFromAgent ? 'rgba(34,197,94,.1)' : 'var(--surface2)';
+        const borderColor = isFromAgent ? 'var(--green)' : 'var(--accent)';
+        const arrow = isFromAgent ? '📤 От агента' : '📥 К агенту';
+        
+        return `<div style="margin-bottom:12px;padding:10px 14px;background:${bgColor};border-left:3px solid ${borderColor};border-radius:6px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+            <span class="time-ago">${timeAgo(m.timestamp)}</span>
+            <span style="font-size:11px;color:var(--text-dim)">${arrow}</span>
+          </div>
+          <div style="margin-bottom:4px">
+            <strong style="color:var(--accent)">${m.from_agent || '<system>'}</strong> 
+            → <strong>${m.to_agent || 'broadcast'}</strong>
+          </div>
+          <div style="color:var(--text);font-size:13px;white-space:pre-wrap">${m.content}</div>
+          ${m.task_id ? `<div class="mono" style="color:var(--text-dim);font-size:11px;margin-top:4px">task: ${m.task_id}</div>` : ''}
+        </div>`;
+      }).join('');
+    }
+    
+    document.getElementById('agent-modal').style.display = 'flex';
+  } catch(e) {
+    console.error('Failed to load agent messages:', e);
+  }
+}
+
+function closeModal() {
+  document.getElementById('agent-modal').style.display = 'none';
+}
+
+// Close modal on Escape key
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeModal();
+});
+
+// Close modal on backdrop click
+document.getElementById('agent-modal').addEventListener('click', (e) => {
+  if (e.target.id === 'agent-modal') closeModal();
+});
 
 // Initial load
 refreshAll();

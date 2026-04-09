@@ -40,6 +40,10 @@ class DashboardAPI(SimpleHTTPRequestHandler):
             self._json_response(self._get_tasks())
         elif self.path == "/api/messages":
             self._json_response(self._get_messages())
+        elif self.path.startswith("/api/messages/agent/"):
+            # /api/messages/agent/<agent_id>
+            agent_id = self.path.split("/")[-1]
+            self._json_response(self._get_agent_messages(agent_id))
         elif self.path == "/api/summary":
             self._json_response(self._get_summary())
         elif self.path == "/api/stream":
@@ -110,6 +114,17 @@ class DashboardAPI(SimpleHTTPRequestHandler):
     def _get_messages(self):
         msgs_file = STATE_DIR / "messages.json"
         return _read_json(msgs_file)
+
+    def _get_agent_messages(self, agent_id: str):
+        """Get messages for a specific agent (sent to or from this agent)."""
+        all_messages = self._get_messages()
+        agent_messages = []
+        for msg in all_messages:
+            if msg.get("to_agent") == agent_id or msg.get("from_agent") == agent_id:
+                agent_messages.append(msg)
+        # Sort by timestamp ascending
+        agent_messages.sort(key=lambda x: x.get("timestamp", 0))
+        return agent_messages
 
     def _get_summary(self):
         tasks = self._get_tasks()

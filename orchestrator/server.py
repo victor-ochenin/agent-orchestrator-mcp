@@ -26,6 +26,51 @@ _qwen_agents: dict[str, str] = {}  # agent_id -> task_id
 DASHBOARD_PORT = int(os.environ.get("ORCHESTRATOR_DASHBOARD_PORT", 8765))
 
 
+async def _monitor_qwen_agent(agent_id: str, task_id: str):
+    """Background task to monitor Qwen agent and send results to message bus."""
+    # Wait for agent to finish
+    while True:
+        await asyncio.sleep(2)
+        output = registry.get_output(agent_id, last_n=200)
+        agent_status = output.get("status", "unknown")
+        if agent_status in ("stopped", "failed"):
+            # Agent finished, send results
+            lines = output.get("lines", [])
+            result_text = "\n".join(lines).strip() if lines else "(пустой вывод)"
+            
+            # Update task
+            tasks = task_manager.list_tasks()
+            for t in tasks:
+                if t["id"] == task_id:
+                    if t["status"] in ("pending", "running"):
+                        task_manager.update_status(task_id, status="completed", result=result_text[:500])
+                    break
+            
+            # Send result to message bus
+            if agent_status == "failed":
+                error = output.get("error", "Неизвестная ошибка")
+                message_bus.send(
+                    content=f"❌ Агент завершился с ошибкой\nЗадача: {task_id}\nОшибка: {error}",
+                    from_agent=agent_id,
+                    to_agent="orchestrator",
+                    task_id=task_id,
+                )
+            else:
+                message_bus.send(
+                    content=f"✅ Агент завершил задачу\n\n{result_text}",
+                    from_agent=agent_id,
+                    to_agent="orchestrator",
+                    task_id=task_id,
+                )
+            
+            # Auto-close Qwen agent
+            if agent_id in _qwen_agents:
+                await registry.stop(agent_id)
+                del _qwen_agents[agent_id]
+            
+            break
+
+
 @app.list_tools()
 async def list_tools() -> list[Tool]:
     """Return list of available tools."""
@@ -485,8 +530,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         # Step 2: Spawn Qwen agent in non-interactive mode
         cwd = arguments.get("cwd", ".")
         prompt = arguments["description"]
-        
-        # Use -p for non-interactive one-shot mode and -o json for parseable output
+
+        # Use -p for non-interactive one-shot mode and -o text for parseable output
         info = registry.spawn(
             name=f"qwen-{task.id}",
             command="qwen",
@@ -504,11 +549,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         registry.update_task(info.id, task.id)
 
         message_bus.send(
-            content=f"Qwen-агент запущен для задачи: {task.title}",
+            content=f"🚀 Агент запущен: {info.name}\nЗадача: {task.title}",
             from_agent="orchestrator",
             to_agent=info.id,
             task_id=task.id,
         )
+
+        # Step 5: Start background task to monitor agent and send results
+        asyncio.create_task(_monitor_qwen_agent(info.id, task.id))
 
         return _result({
             "task_id": task.id,
