@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Orchestrator Dashboard</title>
+<style>
+  :root {
+    --bg: #0f172a;
+    --surface: #1e293b;
+    --surface2: #334155;
+    --border: #475569;
+    --text: #f1f5f9;
+    --text-dim: #94a3b8;
+    --accent: #3b82f6;
+    --green: #22c55e;
+    --yellow: #eab308;
+    --red: #ef4444;
+    --orange: #f97316;
+    --purple: #a855f7;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+  .header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .header h1 { font-size: 20px; font-weight: 600; }
+  .header h1 span { color: var(--accent); }
+  .status-bar {
+    display: flex;
+    gap: 24px;
+    font-size: 13px;
+    color: var(--text-dim);
+  }
+  .status-item strong { color: var(--text); font-size: 18px; }
+  .container {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 24px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+  }
+  .full-width { grid-column: 1 / -1; }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  .card-header {
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .card-header h2 { font-size: 16px; font-weight: 600; }
+  .card-body { padding: 0; }
+  .badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+  }
+  .badge-running { background: rgba(34,197,94,.15); color: var(--green); }
+  .badge-pending { background: rgba(234,179,8,.15); color: var(--yellow); }
+  .badge-completed { background: rgba(59,130,246,.15); color: var(--accent); }
+  .badge-failed { background: rgba(239,68,68,.15); color: var(--red); }
+  .badge-cancelled { background: rgba(249,115,22,.15); color: var(--orange); }
+  .badge-stopped { background: rgba(148,163,184,.15); color: var(--text-dim); }
+  .badge-starting { background: rgba(168,85,247,.15); color: var(--purple); }
+  table { width: 100%; border-collapse: collapse; }
+  th {
+    text-align: left;
+    padding: 10px 16px;
+    font-size: 11px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    background: var(--surface2);
+    font-weight: 600;
+    letter-spacing: .5px;
+  }
+  td {
+    padding: 12px 16px;
+    font-size: 13px;
+    border-top: 1px solid var(--border);
+  }
+  tr:hover td { background: rgba(59,130,246,.05); }
+  .mono { font-family: 'Cascadia Code', 'Consolas', monospace; font-size: 12px; }
+  .truncate {
+    max-width: 250px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .btn {
+    padding: 6px 14px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface2);
+    color: var(--text);
+    font-size: 12px;
+    cursor: pointer;
+    transition: all .15s;
+  }
+  .btn:hover { background: var(--accent); border-color: var(--accent); }
+  .btn-danger:hover { background: var(--red); border-color: var(--red); }
+  .btn-sm { padding: 3px 8px; font-size: 11px; }
+  .empty {
+    padding: 40px 20px;
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 14px;
+  }
+  .pulse {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 6px;
+    animation: pulse 2s infinite;
+  }
+  .pulse-green { background: var(--green); }
+  .pulse-yellow { background: var(--yellow); }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: .4; }
+  }
+  .log-area {
+    max-height: 300px;
+    overflow-y: auto;
+    padding: 12px 16px;
+    font-family: 'Cascadia Code', 'Consolas', monospace;
+    font-size: 12px;
+    line-height: 1.6;
+  }
+  .log-area::-webkit-scrollbar { width: 6px; }
+  .log-area::-webkit-scrollbar-track { background: var(--surface); }
+  .log-area::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  .time-ago { color: var(--text-dim); font-size: 11px; }
+  @media (max-width: 900px) {
+    .container { grid-template-columns: 1fr; }
+    .header { flex-direction: column; gap: 12px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1><span>◆</span> Agent Orchestrator</h1>
+  <div class="status-bar">
+    <div class="status-item">Задачи: <strong id="total-tasks">0</strong></div>
+    <div class="status-item">Агенты: <strong id="total-agents">0</strong></div>
+    <div class="status-item">Активные: <strong id="active-agents">0</strong></div>
+    <div class="status-item" id="last-update">—</div>
+  </div>
+</div>
+
+<div class="container">
+  <!-- Agents Card -->
+  <div class="card">
+    <div class="card-header">
+      <h2>⚡ Агенты</h2>
+    </div>
+    <div class="card-body">
+      <table>
+        <thead><tr><th>ID</th><th>Имя</th><th>Команда</th><th>PID</th><th>Статус</th><th>Задача</th></tr></thead>
+        <tbody id="agents-body"></tbody>
+      </table>
+      <div id="agents-empty" class="empty" style="display:none">Нет запущенных агентов</div>
+    </div>
+  </div>
+
+  <!-- Tasks Card -->
+  <div class="card">
+    <div class="card-header">
+      <h2>📋 Задачи</h2>
+      <div style="display:flex;gap:6px">
+        <button class="btn btn-sm" onclick="clearTasks()">Очистить</button>
+      </div>
+    </div>
+    <div class="card-body">
+      <table>
+        <thead><tr><th>ID</th><th>Заголовок</th><th>Приоритет</th><th>Статус</th><th>Агент</th><th>Результат</th></tr></thead>
+        <tbody id="tasks-body"></tbody>
+      </table>
+      <div id="tasks-empty" class="empty" style="display:none">Нет задач</div>
+    </div>
+  </div>
+
+  <!-- Messages Log -->
+  <div class="card full-width">
+    <div class="card-header">
+      <h2>💬 Сообщения</h2>
+      <div style="display:flex;gap:6px">
+        <button class="btn btn-sm" onclick="clearMessages()">Очистить</button>
+        <button class="btn btn-sm" onclick="refreshAll()">Обновить</button>
+      </div>
+    </div>
+    <div class="card-body">
+      <div class="log-area" id="messages-log"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = 'http://127.0.0.1:8765/api';
+
+function statusBadge(s) {
+  return `<span class="badge badge-${s}">${s}</span>`;
+}
+
+function timeAgo(ts) {
+  if (!ts) return '—';
+  const diff = Math.floor(Date.now() / 1000 - ts);
+  if (diff < 60) return `${diff}с назад`;
+  if (diff < 3600) return `${Math.floor(diff/60)}м назад`;
+  return `${Math.floor(diff/3600)}ч назад`;
+}
+
+function priorityLabel(p) {
+  const colors = { high: 'var(--red)', normal: 'var(--accent)', low: 'var(--text-dim)' };
+  return `<span style="color:${colors[p] || colors.normal};font-weight:600">${p}</span>`;
+}
+
+async function refreshAll() {
+  try {
+    const [agentsRes, tasksRes, msgsRes, summaryRes] = await Promise.all([
+      fetch(`${API}/agents`),
+      fetch(`${API}/tasks`),
+      fetch(`${API}/messages`),
+      fetch(`${API}/summary`),
+    ]);
+    const agents = await agentsRes.json();
+    const tasks = await tasksRes.json();
+    const messages = await msgsRes.json();
+    const summary = await summaryRes.json();
+
+    // Summary
+    document.getElementById('total-tasks').textContent = summary.total_tasks;
+    document.getElementById('total-agents').textContent = summary.total_agents;
+    document.getElementById('active-agents').textContent = summary.active_agents;
+    document.getElementById('last-update').textContent = 'Обновлено: ' + new Date().toLocaleTimeString('ru');
+
+    // Agents
+    const ab = document.getElementById('agents-body');
+    const ae = document.getElementById('agents-empty');
+    if (agents.length === 0) { ab.innerHTML = ''; ae.style.display = 'block'; }
+    else {
+      ae.style.display = 'none';
+      ab.innerHTML = agents.map(a => `<tr>
+        <td class="mono">${a.id}</td>
+        <td>${a.name}</td>
+        <td class="mono">${a.command} ${a.args.join(' ')}</td>
+        <td class="mono">${a.pid || '—'}</td>
+        <td>${a.status === 'running' ? '<span class="pulse pulse-green"></span>' : '<span class="pulse pulse-yellow"></span>'} ${statusBadge(a.status)}</td>
+        <td class="mono">${a.current_task || '—'}</td>
+      </tr>`).join('');
+    }
+
+    // Tasks
+    const tb = document.getElementById('tasks-body');
+    const te = document.getElementById('tasks-empty');
+    if (tasks.length === 0) { tb.innerHTML = ''; te.style.display = 'block'; }
+    else {
+      te.style.display = 'none';
+      tb.innerHTML = tasks.map(t => `<tr>
+        <td class="mono">${t.id}</td>
+        <td class="truncate" title="${t.description || ''}">${t.title}</td>
+        <td>${priorityLabel(t.priority)}</td>
+        <td>${statusBadge(t.status)}</td>
+        <td class="mono">${t.assigned_to || '—'}</td>
+        <td class="truncate" title="${t.result || ''}">${t.result || '—'}</td>
+      </tr>`).join('');
+    }
+
+    // Messages
+    const ml = document.getElementById('messages-log');
+    ml.innerHTML = messages.map(m => {
+      const from = m.from_agent || '<system>';
+      const to = m.to_agent ? `→ <strong>${m.to_agent}</strong>` : '<span style="color:var(--purple)">→ broadcast</span>';
+      return `<div style="margin-bottom:8px;padding:8px 12px;background:var(--surface2);border-radius:6px">
+        <span class="time-ago">${timeAgo(m.timestamp)}</span>
+        &nbsp; <strong style="color:var(--accent)">${from}</strong> ${to}<br>
+        ${m.content}
+        ${m.task_id ? `<br><span class="mono" style="color:var(--text-dim);font-size:11px">task: ${m.task_id}</span>` : ''}
+      </div>`;
+    }).join('');
+
+  } catch(e) {
+    console.error('Refresh error:', e);
+  }
+}
+
+async function clearTasks() {
+  if (!confirm('Очистить все задачи?')) return;
+  await fetch(`${API}/tasks/clear`, { method: 'POST' });
+  refreshAll();
+}
+
+async function clearMessages() {
+  if (!confirm('Очистить все сообщения?')) return;
+  await fetch(`${API}/messages/clear`, { method: 'POST' });
+  refreshAll();
+}
+
+// Initial load
+refreshAll();
+// Auto-refresh every 3 seconds
+setInterval(refreshAll, 3000);
+</script>
+</body>
+</html>

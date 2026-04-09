@@ -1,0 +1,205 @@
+"""Agent registry — manages subprocess agents."""
+
+import asyncio
+import shutil
+import uuid
+import time
+import platform
+from dataclasses import dataclass, field, asdict
+from pathlib import Path
+from typing import Optional
+
+
+@dataclass
+class AgentInfo:
+    """Information about a spawned agent."""
+    id: str
+    name: str
+    command: str
+    args: list[str]
+    cwd: str
+    status: str  # "running", "stopped", "failed"
+    pid: Optional[int] = None
+    created_at: float = field(default_factory=time.time)
+    stopped_at: Optional[float] = None
+    error: Optional[str] = None
+    current_task: Optional[str] = None
+
+
+def _resolve_command(command: str) -> str:
+    """Resolve command path, handling Windows .cmd/.bat extensions."""
+    found = shutil.which(command)
+    if found:
+        return found
+    # On Windows, try adding .cmd/.bat extensions
+    if platform.system() == "Windows":
+        for ext in [".cmd", ".bat", ".ps1"]:
+            found = shutil.which(command + ext)
+            if found:
+                return found
+    return command  # Return original if not found
+
+
+class AgentRegistry:
+    """Registry of all spawned agents."""
+
+    def __init__(self):
+        self._agents: dict[str, AgentInfo] = {}
+        self._processes: dict[str, asyncio.subprocess.Process] = {}
+        self._output_buffers: dict[str, list[str]] = {}
+
+    def spawn(self, name: str, command: str, args: list[str], cwd: str) -> AgentInfo:
+        """Register a new agent (asyncio process creation happens in spawn_process)."""
+        agent_id = str(uuid.uuid4())[:8]
+        # Resolve command path for Windows compatibility
+        resolved_command = _resolve_command(command)
+        info = AgentInfo(
+            id=agent_id,
+            name=name,
+            command=resolved_command,
+            args=args,
+            cwd=cwd,
+            status="starting",
+        )
+        self._agents[agent_id] = info
+        self._output_buffers[agent_id] = []
+        return info
+
+    async def spawn_process(self, agent_id: str) -> dict:
+        """Actually start the subprocess for a registered agent."""
+        info = self._agents.get(agent_id)
+        if not info:
+            return {"error": f"Agent {agent_id} not found"}
+
+        cmd = [info.command] + info.args
+        cwd_path = info.cwd if Path(info.cwd).exists() else None
+        
+        # On Windows, use shell=True for .cmd/.bat/.ps1 files
+        use_shell = platform.system() == "Windows" and info.command.lower().endswith((".cmd", ".bat", ".ps1"))
+        
+        try:
+            if use_shell:
+                # For batch files, we need to use shell
+                full_cmd = " ".join([info.command] + [f'"{a}"' if " " in str(a) else str(a) for a in info.args])
+                process = await asyncio.create_subprocess_shell(
+                    full_cmd,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd_path,
+                )
+            else:
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd_path,
+                )
+            info.pid = process.pid
+            info.status = "running"
+            self._processes[agent_id] = process
+
+            # Start background task to read output
+            asyncio.create_task(self._read_output(agent_id, process))
+
+            return {"agent_id": agent_id, "pid": process.pid, "status": "running"}
+        except FileNotFoundError:
+            info.status = "failed"
+            info.error = f"Command not found: {info.command}"
+            return {"error": info.error}
+        except Exception as e:
+            info.status = "failed"
+            info.error = str(e)
+            return {"error": str(e)}
+
+    async def _read_output(self, agent_id: str, process: asyncio.subprocess.Process):
+        """Background task to read subprocess stdout."""
+        if process.stdout is None:
+            return
+        try:
+            while True:
+                line = await process.stdout.readline()
+                if not line:
+                    break
+                decoded = line.decode("utf-8", errors="replace").rstrip()
+                self._output_buffers.setdefault(agent_id, []).append(decoded)
+                # Keep buffer manageable
+                if len(self._output_buffers[agent_id]) > 500:
+                    self._output_buffers[agent_id] = self._output_buffers[agent_id][-200:]
+        except Exception:
+            pass
+        finally:
+            # Process exited
+            if agent_id in self._agents:
+                self._agents[agent_id].status = "stopped"
+                self._agents[agent_id].stopped_at = time.time()
+                rc = await process.wait()
+                if rc != 0:
+                    self._agents[agent_id].error = f"Exit code: {rc}"
+
+    async def stop(self, agent_id: str) -> dict:
+        """Stop a running agent."""
+        info = self._agents.get(agent_id)
+        if not info:
+            return {"error": f"Agent {agent_id} not found"}
+
+        process = self._processes.get(agent_id)
+        if process and process.returncode is None:
+            try:
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=3.0)
+                except asyncio.TimeoutError:
+                    process.kill()
+                    await process.wait()
+            except Exception as e:
+                return {"error": f"Failed to stop: {e}"}
+
+        info.status = "stopped"
+        info.stopped_at = time.time()
+        self._processes.pop(agent_id, None)
+        return {"agent_id": agent_id, "status": "stopped"}
+
+    def list_agents(self) -> list[dict]:
+        """List all registered agents."""
+        result = []
+        for info in self._agents.values():
+            d = asdict(info)
+            d["output_lines"] = len(self._output_buffers.get(info.id, []))
+            result.append(d)
+        return result
+
+    def get_output(self, agent_id: str, last_n: int = 50) -> dict:
+        """Get recent output from an agent."""
+        info = self._agents.get(agent_id)
+        if not info:
+            return {"error": f"Agent {agent_id} not found"}
+
+        buffer = self._output_buffers.get(agent_id, [])
+        lines = buffer[-last_n:] if len(buffer) > last_n else buffer
+        return {
+            "agent_id": agent_id,
+            "status": info.status,
+            "lines": lines,
+            "total_available": len(buffer),
+        }
+
+    def update_task(self, agent_id: str, task_id: Optional[str]):
+        """Update the current task assignment for an agent."""
+        info = self._agents.get(agent_id)
+        if info:
+            info.current_task = task_id
+
+    async def send_input(self, agent_id: str, text: str) -> dict:
+        """Send text to agent's stdin."""
+        process = self._processes.get(agent_id)
+        if not process or process.stdin is None:
+            return {"error": f"Agent {agent_id} is not running or has no stdin"}
+
+        try:
+            process.stdin.write((text + "\n").encode("utf-8"))
+            await process.stdin.drain()
+            return {"sent": True}
+        except Exception as e:
+            return {"error": f"Failed to send input: {e}"}
