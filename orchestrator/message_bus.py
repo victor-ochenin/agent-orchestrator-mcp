@@ -122,7 +122,7 @@ class MessageBus:
     def get(
         self,
         agent_id: Optional[str] = None,
-        last_n: int = 50,
+        last_n: int = 500,
         after_timestamp: Optional[float] = None,
     ) -> list[dict]:
         """

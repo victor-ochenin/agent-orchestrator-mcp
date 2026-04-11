@@ -1,6 +1,6 @@
 # Agent Orchestrator MCP Server
 
-MCP-сервер для локальной оркестрации мультиагентных систем. Не требует API-ключей — агенты запускаются как локальные subprocess-ы.
+MCP-сервер для локальной оркестрации мультиагентных систем. Агенты запускаются через ACP (Agent Client Protocol) — чистый JSON-RPC API над stdin/stdout.
 
 ---
 
@@ -33,12 +33,12 @@ MCP-сервер для локальной оркестрации мультиа
 - Нет параллелизма — задачи выполняются последовательно
 - Теряется контекст между сессиями
 
-**Agent Orchestrator** решает это, позволяя агенту-оркестратору (LLM через MCP-клиент) создавать, управлять и координировать несколько subprocess-агентов:
+**Agent Orchestrator** решает это, позволяя агенту-оркестратору (LLM через MCP-клиент) создавать, управлять и координировать несколько виртуальных агентов через ACP:
 
-- Каждый агент — независимый процесс с собственным stdin/stdout
+- Каждый агент — независимая ACP-сессия с собственным контекстом
 - Задачи сохраняются в JSON между сессиями
 - Шина сообщений для меж-агентной коммуникации
-- **Никаких внешних API-ключей** — всё работает локально
+- **Никаких внешних API-ключей** — всё работает локально через Qwen Code
 
 ### Архитектура
 
@@ -57,13 +57,14 @@ MCP-сервер для локальной оркестрации мультиа
 │  └──────┬──────┘  └────┬─────┘  └───┬────┘  │
 │         │              │            │        │
 │         ▼              ▼            ▼        │
-│   subprocesses    tasks.json   messages.json  │
+│   ACP clients     tasks.json   messages.json  │
+│   (virtual agents)                            │
 └─────────────────────────────────────────────┘
          │
     ┌────┼────────────┐
     ▼    ▼            ▼
  Agent1 Agent2     Agent3
- (python) (node)   (bash script)
+  (ACP)   (ACP)     (ACP)
 ```
 
 ### Установка
@@ -115,11 +116,16 @@ pip install -e .
 
 ### Доступные инструменты
 
+#### Основной инструмент запуска задач
+
+| Инструмент | Описание |
+|---|---|
+| `run_task` | Запустить одну или несколько задач через ACP в одной сессии |
+
 #### Управление агентами
 
 | Инструмент | Описание |
 |---|---|
-| `spawn_agent` | Запустить нового агента как subprocess |
 | `list_agents` | Список всех агентов с статусами |
 | `stop_agent` | Остановить агента |
 | `get_agent_output` | Получить вывод агента (stdout/stderr) |
@@ -134,38 +140,67 @@ pip install -e .
 | `update_task` | Обновить статус/результат задачи |
 | `assign_task` | Назначить задачу агенту |
 | `task_summary` | Статистика по задачам |
+| `clear_tasks` | Очистить все задачи |
 
 #### Коммуникация
 
 | Инструмент | Описание |
 |---|---|
 | `send_message` | Отправить сообщение конкретному агенту |
-| `get_messages` | Прочитать сообщения из шины |
+| `get_messages` | Прочитать сообщения из шины (по умолчанию до 500 последних) |
 | `broadcast_message` | Отправить сообщение всем агентам |
+| `clear_messages` | Очистить все сообщения |
+
+#### Сессия и рабочее пространство
+
+| Инструмент | Описание |
+|---|---|
+| `clear_session` | Очистить все сообщения и задачи |
+| `set_workspace` | Установить рабочую директорию |
+| `get_workspace` | Получить текущую рабочую директорию |
+
+### Web Dashboard
+
+Оркестратор запускает встроенный веб-дашборд для мониторинга в реальном времени.
+
+- **URL:** `http://127.0.0.1:8765`
+- **Порт** настраивается через переменную окружения `ORCHESTRATOR_DASHBOARD_PORT`
+
+**Возможности дашборда:**
+- Таблица агентов с ролями, статусами и действиями (Stop, Delete, View Messages)
+- Таблица задач с приоритетами и статусами
+- Лента сообщений оркестратора с поддержкой Markdown
+- Все сообщения шины с фильтрацией по агенту
+- Модальное окно для просмотра сообщений конкретного агента
+- Автоматическое обновление каждые 3 секунды
+- Тёмная тема
+
+> **Сообщения отображаются полностью** — без сокращений и обрезок. Длинные тексты автоматически переносятся на новую строку.
 
 #### Примеры использования
 
 ```
-# Запустить Python-агент
-spawn_agent(name="worker-1", command="python", args=["-i"], cwd="C:\\project")
+# Запустить задачу через ACP
+run_task(prompts=["Реализовать CRUD API для пользователей"])
 
-# Запустить Node.js-агент
-spawn_agent(name="frontend", command="node", args=["-i"], cwd="C:\\project\\frontend")
+# Запустить несколько задач в одной сессии
+run_task(prompts=[
+  "Создать модель User с полями id, name, email",
+  "Написать тесты для модели User",
+  "Создать endpoint GET /users"
+])
+
+# Запустить задачу в конкретной директории
+run_task(prompts=["Проанализировать код"], cwd="C:\\project")
 
 # Посмотреть всех агентов
 list_agents()
 
-# Создать задачу
+# Создать задачу вручную
 create_task(title="Реализовать API", description="Создать CRUD endpoints", priority="high")
 
 # Назначить задачу агенту
 assign_task(task_id="abc12345", agent_id="def67890")
-
-# Отправить команду агенту
-send_to_agent(agent_id="def67890", text="print('hello')")
-
-# Получить вывод
-get_agent_output(agent_id="def67890", last_n=20)
 
 # Broadcast всем
 broadcast_message(content="Начинаем работу над спринтом #5")
@@ -184,12 +219,12 @@ When an LLM agent tackles complex tasks, it faces limitations:
 - No parallelism — tasks run sequentially
 - Context is lost between sessions
 
-**Agent Orchestrator** solves this by allowing an orchestrator agent (LLM via MCP client) to create, manage, and coordinate multiple subprocess agents:
+**Agent Orchestrator** solves this by allowing an orchestrator agent (LLM via MCP client) to create, manage, and coordinate multiple virtual agents via ACP:
 
-- Each agent is an independent process with its own stdin/stdout
+- Each agent is an independent ACP session with its own context
 - Tasks persist in JSON between sessions
 - Message bus for inter-agent communication
-- **No external API keys** — everything runs locally
+- **No external API keys** — everything runs locally via Qwen Code
 
 ### Architecture
 
@@ -208,13 +243,14 @@ When an LLM agent tackles complex tasks, it faces limitations:
 │  └──────┬──────┘  └────┬─────┘  └───┬────┘  │
 │         │              │            │        │
 │         ▼              ▼            ▼        │
-│   subprocesses    tasks.json   messages.json  │
+│   ACP clients     tasks.json   messages.json  │
+│   (virtual agents)                            │
 └─────────────────────────────────────────────┘
          │
     ┌────┼────────────┐
     ▼    ▼            ▼
  Agent1 Agent2     Agent3
- (python) (node)   (bash script)
+  (ACP)   (ACP)     (ACP)
 ```
 
 ### Installation
@@ -266,11 +302,16 @@ Add the server to your MCP client's configuration (e.g. Qwen Code's `settings.js
 
 ### Available tools
 
+#### Main task execution tool
+
+| Tool | Description |
+|---|---|
+| `run_task` | Run one or more tasks via ACP in a single session |
+
 #### Agent Management
 
 | Tool | Description |
 |---|---|
-| `spawn_agent` | Launch a new agent as a subprocess |
 | `list_agents` | List all agents with statuses |
 | `stop_agent` | Stop an agent |
 | `get_agent_output` | Get agent output (stdout/stderr) |
@@ -285,38 +326,67 @@ Add the server to your MCP client's configuration (e.g. Qwen Code's `settings.js
 | `update_task` | Update task status/result |
 | `assign_task` | Assign a task to an agent |
 | `task_summary` | Task statistics |
+| `clear_tasks` | Clear all tasks |
 
 #### Communication
 
 | Tool | Description |
 |---|---|
 | `send_message` | Send a message to a specific agent |
-| `get_messages` | Read messages from the bus |
+| `get_messages` | Read messages from the bus (up to 500 last by default) |
 | `broadcast_message` | Broadcast a message to all agents |
+| `clear_messages` | Clear all messages |
+
+#### Session & Workspace
+
+| Tool | Description |
+|---|---|
+| `clear_session` | Clear all messages and tasks |
+| `set_workspace` | Set working directory |
+| `get_workspace` | Get current working directory |
+
+### Web Dashboard
+
+The orchestrator launches a built-in web dashboard for real-time monitoring.
+
+- **URL:** `http://127.0.0.1:8765`
+- **Port** configurable via `ORCHESTRATOR_DASHBOARD_PORT` environment variable
+
+**Dashboard features:**
+- Agents table with roles, statuses and actions (Stop, Delete, View Messages)
+- Tasks table with priorities and statuses
+- Orchestrator message feed with Markdown support
+- All bus messages with agent filtering
+- Modal for viewing specific agent messages
+- Auto-refresh every 3 seconds
+- Dark theme
+
+> **Messages are displayed in full** — no truncation. Long text automatically wraps.
 
 #### Usage examples
 
 ```
-# Spawn a Python agent
-spawn_agent(name="worker-1", command="python", args=["-i"], cwd="/home/user/project")
+# Run a task via ACP
+run_task(prompts=["Implement CRUD API for users"])
 
-# Spawn a Node.js agent
-spawn_agent(name="frontend", command="node", args=["-i"], cwd="/home/user/project/frontend")
+# Run multiple tasks in one session
+run_task(prompts=[
+  "Create User model with id, name, email fields",
+  "Write tests for User model",
+  "Create GET /users endpoint"
+])
+
+# Run a task in a specific directory
+run_task(prompts=["Analyze code"], cwd="/home/user/project")
 
 # List all agents
 list_agents()
 
-# Create a task
+# Create a task manually
 create_task(title="Implement API", description="Create CRUD endpoints", priority="high")
 
 # Assign task to agent
 assign_task(task_id="abc12345", agent_id="def67890")
-
-# Send command to agent
-send_to_agent(agent_id="def67890", text="print('hello')")
-
-# Get output
-get_agent_output(agent_id="def67890", last_n=20)
 
 # Broadcast to all
 broadcast_message(content="Starting sprint #5")

@@ -102,12 +102,6 @@
   }
   tr:hover td { background: rgba(59,130,246,.05); }
   .mono { font-family: 'Cascadia Code', 'Consolas', monospace; font-size: 12px; }
-  .truncate {
-    max-width: 250px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
   .btn {
     padding: 6px 14px;
     border: 1px solid var(--border);
@@ -182,7 +176,7 @@
   .agent-actions { display: flex; gap: 2px; }
 
   /* Markdown rendering in messages */
-  .md-content { color: var(--text); font-size: 13px; white-space: pre-wrap; }
+  .md-content { color: var(--text); font-size: 13px; white-space: pre-wrap; word-break: break-word; }
   .md-content.rendered { white-space: normal; }
   .md-content p { margin: 4px 0; }
   .md-content code {
@@ -389,7 +383,7 @@ async function refreshAll() {
       ab.innerHTML = agents.map(a => {
         const role = a.role || {};
         const taskId = a.task_id || a.current_task;
-        const taskDisplay = taskId ? `<div class="truncate mono" title="${taskId}">${taskId}</div>` : '<span class="mono" style="color:var(--text-dim)">—</span>';
+        const taskDisplay = taskId ? `<div class="mono" style="max-width:200px;word-break:break-all;white-space:normal" title="${taskId}">${taskId}</div>` : '<span class="mono" style="color:var(--text-dim)">—</span>';
         const pidDisplay = a.pid ? `<span class="mono">${a.pid}</span>` : '<span class="mono" style="color:var(--text-dim)">—</span>';
         return `<tr>
           <td>${roleBadge(role)}</td>
@@ -416,7 +410,7 @@ async function refreshAll() {
       te.style.display = 'none';
       tb.innerHTML = tasks.map(t => `<tr>
         <td class="mono">${t.id}</td>
-        <td class="truncate" title="${t.description || ''}">${t.title}</td>
+        <td title="${t.description || ''}">${t.title}</td>
         <td>${priorityLabel(t.priority)}</td>
         <td>${statusBadge(t.status)}</td>
         <td class="mono">${t.assigned_to || '—'}</td>
