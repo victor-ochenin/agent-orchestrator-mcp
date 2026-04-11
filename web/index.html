@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Agent Orchestrator Dashboard</title>
+<!-- Marked.js for Markdown rendering -->
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <style>
   :root {
     --bg: #0f172a;
@@ -119,6 +121,19 @@
   .btn:hover { background: var(--accent); border-color: var(--accent); }
   .btn-danger:hover { background: var(--red); border-color: var(--red); }
   .btn-sm { padding: 3px 8px; font-size: 11px; }
+  .btn-icon {
+    padding: 3px 6px;
+    font-size: 14px;
+    line-height: 1;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    border-radius: 4px;
+    transition: all .15s;
+  }
+  .btn-icon:hover { background: var(--surface); color: var(--text); }
+  .btn-icon.danger:hover { background: rgba(239,68,68,.2); color: var(--red); }
   .empty {
     padding: 40px 20px;
     text-align: center;
@@ -142,14 +157,74 @@
     max-height: 300px;
     overflow-y: auto;
     padding: 12px 16px;
-    font-family: 'Cascadia Code', 'Consolas', monospace;
-    font-size: 12px;
+    font-size: 13px;
     line-height: 1.6;
   }
   .log-area::-webkit-scrollbar { width: 6px; }
   .log-area::-webkit-scrollbar-track { background: var(--surface); }
   .log-area::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
   .time-ago { color: var(--text-dim); font-size: 11px; }
+  .role-badge {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 600;
+    background: rgba(168,85,247,.15);
+    color: var(--purple);
+    margin-left: 4px;
+  }
+  .task-id-label {
+    font-size: 10px;
+    color: var(--text-dim);
+    font-family: 'Cascadia Code', 'Consolas', monospace;
+  }
+  .agent-actions { display: flex; gap: 2px; }
+
+  /* Markdown rendering in messages */
+  .md-content { color: var(--text); font-size: 13px; white-space: pre-wrap; }
+  .md-content.rendered { white-space: normal; }
+  .md-content p { margin: 4px 0; }
+  .md-content code {
+    background: var(--surface);
+    padding: 1px 4px;
+    border-radius: 3px;
+    font-family: 'Cascadia Code', 'Consolas', monospace;
+    font-size: 12px;
+    color: var(--green);
+  }
+  .md-content pre {
+    background: var(--bg);
+    padding: 10px 14px;
+    border-radius: 6px;
+    overflow-x: auto;
+    margin: 6px 0;
+    border: 1px solid var(--border);
+  }
+  .md-content pre code {
+    background: transparent;
+    padding: 0;
+    color: var(--text);
+  }
+  .md-content ul, .md-content ol { padding-left: 20px; margin: 4px 0; }
+  .md-content li { margin: 2px 0; }
+  .md-content strong { color: var(--text); }
+  .md-content em { color: var(--text-dim); }
+  .md-content blockquote {
+    border-left: 3px solid var(--accent);
+    padding-left: 12px;
+    margin: 6px 0;
+    color: var(--text-dim);
+  }
+  .md-content a { color: var(--accent); text-decoration: underline; }
+  .md-content h1, .md-content h2, .md-content h3 {
+    margin: 8px 0 4px;
+    font-weight: 600;
+  }
+  .md-content h1 { font-size: 18px; }
+  .md-content h2 { font-size: 16px; }
+  .md-content h3 { font-size: 14px; }
+
   @media (max-width: 900px) {
     .container { grid-template-columns: 1fr; }
     .header { flex-direction: column; gap: 12px; }
@@ -172,11 +247,11 @@
   <!-- Agents Card -->
   <div class="card">
     <div class="card-header">
-      <h2>⚡ Агенты</h2>
+      <h2>Агенты</h2>
     </div>
     <div class="card-body">
       <table>
-        <thead><tr><th>ID</th><th>Имя</th><th>PID</th><th>Статус</th><th>Задача</th><th>Действия</th></tr></thead>
+        <thead><tr><th>Роль</th><th>Имя</th><th>PID</th><th>Задача</th><th>Статус</th><th>Действия</th></tr></thead>
         <tbody id="agents-body"></tbody>
       </table>
       <div id="agents-empty" class="empty" style="display:none">Нет запущенных агентов</div>
@@ -186,7 +261,7 @@
   <!-- Tasks Card -->
   <div class="card">
     <div class="card-header">
-      <h2>📋 Задачи</h2>
+      <h2>Задачи</h2>
       <div style="display:flex;gap:6px">
         <button class="btn btn-sm" onclick="clearTasks()">Очистить</button>
       </div>
@@ -200,12 +275,13 @@
     </div>
   </div>
 
-  <!-- Messages Log -->
+  <!-- Orchestrator Messages -->
   <div class="card full-width">
     <div class="card-header">
       <h2>Сообщения оркестратора</h2>
       <div style="display:flex;gap:6px">
-        <button class="btn btn-sm" onclick="clearMessages()">Очистить</button>
+        <button class="btn btn-sm" onclick="clearOrchestratorMessages()" title="Очистить только сообщения оркестратора">Очистить орк.</button>
+        <button class="btn btn-sm" onclick="clearMessages()" title="Очистить все сообщения">Очистить всё</button>
         <button class="btn btn-sm" onclick="refreshAll()">Обновить</button>
       </div>
     </div>
@@ -214,12 +290,12 @@
     </div>
   </div>
 
-  <!-- Messages Log -->
+  <!-- All Messages -->
   <div class="card full-width">
     <div class="card-header">
-      <h2>💬 Все сообщения</h2>
+      <h2>Все сообщения</h2>
       <div style="display:flex;gap:6px">
-        <button class="btn btn-sm" onclick="clearMessages()">Очистить</button>
+        <button class="btn btn-sm" onclick="clearMessages()">Очистить все</button>
         <button class="btn btn-sm" onclick="refreshAll()">Обновить</button>
       </div>
     </div>
@@ -233,7 +309,7 @@
 <div id="agent-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.7);z-index:1000;justify-content:center;align-items:center">
   <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;max-width:800px;width:90%;max-height:80vh;overflow:hidden;display:flex;flex-direction:column">
     <div class="card-header">
-      <h2 id="modal-title">💬 Сообщения агента</h2>
+      <h2 id="modal-title">Сообщения агента</h2>
       <button class="btn btn-sm" onclick="closeModal()">✕ Закрыть</button>
     </div>
     <div class="card-body" style="overflow-y:auto;max-height:70vh;padding:16px">
@@ -244,6 +320,24 @@
 
 <script>
 const API = 'http://127.0.0.1:8765/api';
+
+// Configure Marked.js
+if (typeof marked !== 'undefined') {
+  marked.setOptions({
+    breaks: true,
+    gfm: true,
+  });
+}
+
+function renderMarkdown(text) {
+  if (typeof marked !== 'undefined') {
+    return marked.parse(text);
+  }
+  // Fallback: escape code blocks
+  return text
+    .replace(/```[\s\S]*?```/g, '<pre><code>$&</code></pre>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>');
+}
 
 function statusBadge(s) {
   return `<span class="badge badge-${s}">${s}</span>`;
@@ -260,6 +354,11 @@ function timeAgo(ts) {
 function priorityLabel(p) {
   const colors = { high: 'var(--red)', normal: 'var(--accent)', low: 'var(--text-dim)' };
   return `<span style="color:${colors[p] || colors.normal};font-weight:600">${p}</span>`;
+}
+
+function roleBadge(role) {
+  if (!role || !role.role) return '';
+  return `<span class="role-badge">${role.role}</span>`;
 }
 
 async function refreshAll() {
@@ -287,14 +386,26 @@ async function refreshAll() {
     if (agents.length === 0) { ab.innerHTML = ''; ae.style.display = 'block'; }
     else {
       ae.style.display = 'none';
-      ab.innerHTML = agents.map(a => `<tr>
-        <td class="mono">${a.id}</td>
-        <td>${a.name}</td>
-        <td class="mono">${a.pid || '—'}</td>
-        <td>${a.status === 'running' ? '<span class="pulse pulse-green"></span>' : '<span class="pulse pulse-yellow"></span>'} ${statusBadge(a.status)}</td>
-        <td class="mono">${a.current_task || '—'}</td>
-        <td><button class="btn btn-sm" onclick="showAgentMessages('${a.id}')">💬 Сообщения</button></td>
-      </tr>`).join('');
+      ab.innerHTML = agents.map(a => {
+        const role = a.role || {};
+        const taskId = a.task_id || a.current_task;
+        const taskDisplay = taskId ? `<div class="truncate mono" title="${taskId}">${taskId}</div>` : '<span class="mono" style="color:var(--text-dim)">—</span>';
+        const pidDisplay = a.pid ? `<span class="mono">${a.pid}</span>` : '<span class="mono" style="color:var(--text-dim)">—</span>';
+        return `<tr>
+          <td>${roleBadge(role)}</td>
+          <td>${a.name}</td>
+          <td>${pidDisplay}</td>
+          <td>${taskDisplay}</td>
+          <td>${a.status === 'running' ? '<span class="pulse pulse-green"></span>' : '<span class="pulse pulse-yellow"></span>'} ${statusBadge(a.status)}</td>
+          <td>
+            <div class="agent-actions">
+              <button class="btn-icon" onclick="showAgentMessages('${a.id}')" title="Сообщения">Msg</button>
+              <button class="btn-icon" onclick="stopAgent('${a.id}')" title="Остановить">Stop</button>
+              <button class="btn-icon danger" onclick="deleteAgent('${a.id}')" title="Удалить">Del</button>
+            </div>
+          </td>
+        </tr>`;
+      }).join('');
     }
 
     // Tasks
@@ -322,10 +433,11 @@ async function refreshAll() {
       const to = m.to_agent ? `→ <strong>${toName}</strong>` : '<span style="color:var(--purple)">→ broadcast</span>';
       const bgColor = 'rgba(59,130,246,.1)';
       const borderColor = 'var(--accent)';
+      const renderedContent = renderMarkdown(m.content);
       return `<div style="margin-bottom:8px;padding:8px 12px;background:${bgColor};border-left:3px solid ${borderColor};border-radius:6px">
         <span class="time-ago">${timeAgo(m.timestamp)}</span>
         &nbsp; <strong style="color:var(--accent)">orchestrator</strong> ${to}<br>
-        <span style="color:var(--text);font-size:13px;white-space:pre-wrap">${m.content}</span>
+        <div class="md-content rendered">${renderedContent}</div>
       </div>`;
     }).join('') || '<div class="empty">Нет сообщений</div>';
 
@@ -335,10 +447,11 @@ async function refreshAll() {
       const fromName = m.from_agent_name || m.from_agent || '<system>';
       const toName = m.to_agent_name || m.to_agent || 'broadcast';
       const to = m.to_agent ? `→ <strong>${toName}</strong>` : '<span style="color:var(--purple)">→ broadcast</span>';
+      const renderedContent = renderMarkdown(m.content);
       return `<div style="margin-bottom:8px;padding:8px 12px;background:var(--surface2);border-radius:6px">
         <span class="time-ago">${timeAgo(m.timestamp)}</span>
         &nbsp; <strong style="color:var(--accent)">${fromName}</strong> ${to}<br>
-        ${m.content}
+        <div class="md-content rendered">${renderedContent}</div>
       </div>`;
     }).join('');
 
@@ -354,8 +467,26 @@ async function clearTasks() {
 }
 
 async function clearMessages() {
-  if (!confirm('Очистить все сообщения?')) return;
+  if (!confirm('Очистить ВСЕ сообщения?')) return;
   await fetch(`${API}/messages/clear`, { method: 'POST' });
+  refreshAll();
+}
+
+async function clearOrchestratorMessages() {
+  if (!confirm('Очистить только сообщения оркестратора? Сообщения агентов останутся.')) return;
+  await fetch(`${API}/messages/clear/orchestrator`, { method: 'POST' });
+  refreshAll();
+}
+
+async function stopAgent(agentId) {
+  if (!confirm('Остановить агента?')) return;
+  await fetch(`${API}/agents/${agentId}/stop`, { method: 'POST' });
+  refreshAll();
+}
+
+async function deleteAgent(agentId) {
+  if (!confirm('Удалить агента? Это остановит процесс и удалит из реестра.')) return;
+  await fetch(`${API}/agents/${agentId}/delete`, { method: 'POST' });
   refreshAll();
 }
 
@@ -363,10 +494,10 @@ async function showAgentMessages(agentId) {
   try {
     const res = await fetch(`${API}/messages/agent/${agentId}`);
     const msgs = await res.json();
-    
-    document.getElementById('modal-title').textContent = `💬 Сообщения агента ${agentId}`;
+
+    document.getElementById('modal-title').textContent = `Сообщения агента ${agentId}`;
     const content = document.getElementById('agent-messages-content');
-    
+
     if (msgs.length === 0) {
       content.innerHTML = '<div class="empty">Нет сообщений</div>';
     } else {
@@ -374,9 +505,10 @@ async function showAgentMessages(agentId) {
         const isFromAgent = m.from_agent === agentId;
         const bgColor = isFromAgent ? 'rgba(34,197,94,.1)' : 'var(--surface2)';
         const borderColor = isFromAgent ? 'var(--green)' : 'var(--accent)';
-        const arrow = isFromAgent ? '📤 От агента' : '📥 К агенту';
+        const arrow = isFromAgent ? 'От агента' : 'К агенту';
         const fromName = m.from_agent_name || m.from_agent || '<system>';
         const toName = m.to_agent_name || m.to_agent || 'broadcast';
+        const renderedContent = renderMarkdown(m.content);
 
         return `<div style="margin-bottom:12px;padding:10px 14px;background:${bgColor};border-left:3px solid ${borderColor};border-radius:6px">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
@@ -386,12 +518,13 @@ async function showAgentMessages(agentId) {
           <div style="margin-bottom:4px">
             <strong style="color:var(--accent)">${fromName}</strong>
             → <strong>${toName}</strong>
+            ${m.task_id ? `<span class="task-id-label" style="margin-left:8px">task: ${m.task_id}</span>` : ''}
           </div>
-          <div style="color:var(--text);font-size:13px;white-space:pre-wrap">${m.content}</div>
+          <div class="md-content rendered">${renderedContent}</div>
         </div>`;
       }).join('');
     }
-    
+
     document.getElementById('agent-modal').style.display = 'flex';
   } catch(e) {
     console.error('Failed to load agent messages:', e);

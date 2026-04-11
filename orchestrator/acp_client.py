@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import platform
 import shutil
 from pathlib import Path
@@ -30,16 +31,18 @@ class ACPClient:
     - Auto-handling permission requests
     """
 
-    def __init__(self, cwd: Optional[str] = None, output_format: str = "json"):
+    def __init__(self, cwd: Optional[str] = None, output_format: str = "json", yolo: bool = False):
         """Initialize ACP client (does not start the process).
 
         Args:
             cwd: Working directory for Qwen sessions
             output_format: Output format flag for qwen CLI (default: "json")
+            yolo: Enable --yolo mode (skip all permission prompts)
         """
         self._qwen_cmd = _find_qwen()
         self._cwd = cwd or "."
         self._output_format = output_format
+        self._yolo = yolo
         self._process: Optional[asyncio.subprocess.Process] = None
         self._session_id: Optional[str] = None
         self._initialized = False
@@ -61,6 +64,8 @@ class ACPClient:
             dict with agent info (name, version, etc.)
         """
         args = [self._qwen_cmd, "--acp", "-o", self._output_format]
+        if self._yolo:
+            args.append("--yolo")
 
         if platform.system() == "Windows":
             full_cmd = " ".join([f'"{a}"' if " " in a else a for a in args])
@@ -110,7 +115,8 @@ class ACPClient:
         Returns:
             Session ID string
         """
-        session_cwd = cwd or self._cwd
+        from orchestrator.registry import validate_cwd
+        session_cwd = validate_cwd(cwd or self._cwd)
         resp = await self._request("session/new", {
             "cwd": session_cwd,
             "mcpServers": mcp_servers or [],
@@ -126,8 +132,8 @@ class ACPClient:
         self,
         prompt: str,
         session_id: Optional[str] = None,
-        timeout_per_message: float = 5.0,
-        max_messages: int = 200,
+        timeout_per_message: float = 30.0,
+        max_messages: int = 500,
         request_id: int = 10,
     ) -> dict:
         """Send a task (prompt) and wait for completion.
@@ -175,14 +181,16 @@ class ACPClient:
             msg_count += 1
 
             msg_id = msg.get("id")
+            method = msg.get("method", "")
+
             if msg_id == request_id:
                 result = msg.get("result", {})
-                if result.get("stopReason"):
-                    stop_reason = result["stopReason"]
+                stop_reason = result.get("stopReason") or result.get("stop_reason")
+                if stop_reason:
                     break
                 continue
 
-            if "session/update" in msg.get("method", ""):
+            if "session/update" in method:
                 update = msg.get("params", {}).get("update", {})
                 session_update_type = update.get("sessionUpdate", "")
                 content = update.get("content", {})
@@ -192,12 +200,16 @@ class ACPClient:
                 else:
                     text = str(content) if content else ""
 
-                if session_update_type in ("agent_thought_chunk", "agent_message_chunk"):
+                if session_update_type in ("agent_message_chunk",):
                     if text:
                         answer += text
 
+                # Also check for sessionUpdate directly in params
+                if not session_update_type:
+                    session_update_type = update.get("type", "")
+
             # Auto-respond to permission requests
-            if "session/request_permission" in msg.get("method", ""):
+            if "session/request_permission" in method or "session/requestPermission" in method:
                 perm_id = msg.get("id")
                 if perm_id:
                     self._write({
@@ -205,6 +217,10 @@ class ACPClient:
                         "id": perm_id,
                         "result": {"outcome": "allowAlways"},
                     })
+
+        # If stop_reason not found but we have an answer, consider it success
+        if not stop_reason and answer:
+            stop_reason = "end_turn"
 
         return {
             "answer": answer,

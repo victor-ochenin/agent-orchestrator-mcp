@@ -1,6 +1,7 @@
 """Agent registry — manages subprocess agents."""
 
 import asyncio
+import os
 import shutil
 import uuid
 import time
@@ -8,6 +9,39 @@ import platform
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
+
+# Default allowed cwd root — agents cannot escape this directory tree.
+# Can be overridden via ORCHESTRATOR_ALLOWED_CWD_ROOT env var.
+_DEFAULT_CWD_ROOT = Path(os.getcwd()).resolve()
+_ALLOWED_CWD_ROOT = Path(os.environ.get("ORCHESTRATOR_ALLOWED_CWD_ROOT", str(_DEFAULT_CWD_ROOT))).resolve()
+
+
+def validate_cwd(cwd: str) -> str:
+    """Validate and resolve cwd to ensure it is within the allowed directory tree.
+
+    Returns the resolved path if valid.
+    Raises ValueError if cwd attempts to escape the allowed root.
+    """
+    resolved = Path(cwd).resolve()
+
+    # On Windows, also check the drive letter matches
+    if platform.system() == "Windows":
+        if resolved.drive != _ALLOWED_CWD_ROOT.drive:
+            raise ValueError(
+                f"CWD '{cwd}' resolved to '{resolved}' which is on a different drive "
+                f"than allowed root '{_ALLOWED_CWD_ROOT}'."
+            )
+
+    try:
+        resolved.relative_to(_ALLOWED_CWD_ROOT)
+    except ValueError:
+        raise ValueError(
+            f"CWD '{cwd}' resolved to '{resolved}' which is outside the allowed "
+            f"directory tree '{_ALLOWED_CWD_ROOT}'. "
+            f"Set ORCHESTRATOR_ALLOWED_CWD_ROOT to change the allowed root."
+        )
+
+    return str(resolved)
 
 
 @dataclass
@@ -24,6 +58,7 @@ class AgentInfo:
     stopped_at: Optional[float] = None
     error: Optional[str] = None
     current_task: Optional[str] = None
+    role: Optional[dict] = None  # {"role": "coder", "description": "..."}
 
 
 def _resolve_command(command: str) -> str:
@@ -48,8 +83,11 @@ class AgentRegistry:
         self._processes: dict[str, asyncio.subprocess.Process] = {}
         self._output_buffers: dict[str, list[str]] = {}
 
-    def spawn(self, name: str, command: str, args: list[str], cwd: str) -> AgentInfo:
+    def spawn(self, name: str, command: str, args: list[str], cwd: str, role: Optional[dict] = None) -> AgentInfo:
         """Register a new agent (asyncio process creation happens in spawn_process)."""
+        # Validate cwd is within allowed directory tree
+        validated_cwd = validate_cwd(cwd)
+
         agent_id = str(uuid.uuid4())[:8]
         # Resolve command path for Windows compatibility
         resolved_command = _resolve_command(command)
@@ -58,8 +96,9 @@ class AgentRegistry:
             name=name,
             command=resolved_command,
             args=args,
-            cwd=cwd,
+            cwd=validated_cwd,
             status="starting",
+            role=role,
         )
         self._agents[agent_id] = info
         self._output_buffers[agent_id] = []
@@ -72,8 +111,19 @@ class AgentRegistry:
             return {"error": f"Agent {agent_id} not found"}
 
         cmd = [info.command] + info.args
-        cwd_path = info.cwd if Path(info.cwd).exists() else None
-        
+
+        # Sanitize args — block path traversal patterns
+        for arg in info.args:
+            if ".." in arg and ("/" in arg or "\\" in arg):
+                info.status = "failed"
+                info.error = f"Blocked arg with path traversal: {arg}"
+                return {"error": info.error}
+
+        # Ensure cwd exists and is within allowed directory
+        cwd_path = Path(info.cwd)
+        if not cwd_path.exists():
+            cwd_path.mkdir(parents=True, exist_ok=True)
+
         # On Windows, use shell=True for .cmd/.bat/.ps1 files
         use_shell = platform.system() == "Windows" and info.command.lower().endswith((".cmd", ".bat", ".ps1"))
         

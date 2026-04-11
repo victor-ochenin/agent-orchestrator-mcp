@@ -14,7 +14,7 @@ from orchestrator.registry import AgentRegistry
 from orchestrator.task_manager import TaskManager
 from orchestrator.message_bus import MessageBus
 from orchestrator.web_server import start_dashboard_server
-from orchestrator.utils import generate_slug
+from orchestrator.utils import generate_slug, pick_role, generate_agent_name
 from orchestrator.acp_client import ACPClient
 
 app = Server("agent-orchestrator-mcp")
@@ -25,23 +25,29 @@ task_manager = TaskManager()
 message_bus = MessageBus()
 
 # Track which agents are Qwen agents (for auto-close on task complete)
-# Format: agent_id -> {"task_id": str, "agent_name": str, "queue": list[str]}
-_qwen_agents: dict[str, dict] = {}  # agent_id -> {task_id, agent_name, queue}
+# Format: agent_id -> {"task_id": str, "agent_name": str, "role": dict, "queue": list[str]}
+_qwen_agents: dict[str, dict] = {}  # agent_id -> {task_id, agent_name, role, queue}
+
+# Rate limiting: track total agents spawned per session
+_MAX_AGENTS_PER_SESSION = int(os.environ.get("ORCHESTRATOR_MAX_AGENTS", 5))
+_spawned_agents_count = 0
 
 DASHBOARD_PORT = int(os.environ.get("ORCHESTRATOR_DASHBOARD_PORT", 8765))
 
 
 def _resolve_agent_name(agent_id: Optional[str]) -> Optional[str]:
-    """Resolve agent ID to human-readable name."""
+    """Resolve agent ID to human-readable name (role-based)."""
     if agent_id is None:
         return None
     # Special names
     if agent_id == "orchestrator":
         return "orchestrator"
-    # Check Qwen agents first
+    # Check Qwen agents first — use role name
     agent_data = _qwen_agents.get(agent_id)
     if agent_data:
-        return agent_data.get("agent_name", agent_id[:8])
+        role = agent_data.get("role", {})
+        role_name = role.get("role", "agent")
+        return role_name
     # Check registry
     info = registry._agents.get(agent_id)
     if info:
@@ -72,32 +78,19 @@ def _broadcast_msg(content: str, from_agent: Optional[str] = None, task_id: Opti
     )
 
 
-async def _run_acp_agent(agent_id: str, agent_name: str, prompts: list[str], task_ids: list[str], cwd: str):
+async def _run_acp_agent(agent_id: str, agent_name: str, role: dict, prompts: list[str], task_ids: list[str], cwd: str, yolo: bool = False):
     """Background task: run ACP client as a virtual agent, processing tasks sequentially."""
-    client = ACPClient(cwd=cwd)
+    client = ACPClient(cwd=cwd, yolo=yolo)
     try:
         # Start ACP session
         agent_info_resp = await client.start()
         session_id = await client.new_session(cwd=cwd)
 
-        _send_msg(
-            content=f"ACP-агент {agent_name} подключён, сессия {session_id[:8]}",
-            from_agent=agent_id,
-            to_agent="orchestrator",
-            task_id=task_ids[0],
-        )
-
         # Process each task
         for i, prompt_text in enumerate(prompts):
             task_id = task_ids[i]
             task_manager.update_status(task_id, status="running")
-
-            _send_msg(
-                content=f"Начинаю задачу {i+1}/{len(prompts)}: {prompts[i][:60]}",
-                from_agent=agent_id,
-                to_agent="orchestrator",
-                task_id=task_id,
-            )
+            registry.update_task(agent_id, task_id)
 
             result = await client.run_task(prompt_text, session_id=session_id, request_id=10 + i)
 
@@ -111,17 +104,17 @@ async def _run_acp_agent(agent_id: str, agent_name: str, prompts: list[str], tas
                 result=answer[:500] if answer else f"(stop: {stop_reason})",
             )
 
-            # Send result as the agent
+            # Send result — only the answer text, no "task completed" prefix
             if answer:
                 _send_msg(
-                    content=f"Задача {i+1}/{len(prompts)} завершена\n\n{answer[:400]}",
+                    content=answer[:1000],
                     from_agent=agent_id,
                     to_agent="orchestrator",
                     task_id=task_id,
                 )
             else:
                 _send_msg(
-                    content=f"Задача {i+1}/{len(prompts)} завершена (stop: {stop_reason}, ответ пуст)",
+                    content=f"Задача не выполнена | stop: {stop_reason or 'N/A'}",
                     from_agent=agent_id,
                     to_agent="orchestrator",
                     task_id=task_id,
@@ -130,8 +123,9 @@ async def _run_acp_agent(agent_id: str, agent_name: str, prompts: list[str], tas
         # All tasks done
         registry._agents[agent_id].status = "stopped"
         _send_msg(
-            content=f"ACP-агент {agent_name} завершил все {len(prompts)} задач",
+            content="Агент завершил задачу",
             from_agent=agent_id,
+            to_agent="orchestrator",
         )
 
     except Exception as e:
@@ -144,7 +138,7 @@ async def _run_acp_agent(agent_id: str, agent_name: str, prompts: list[str], tas
         registry._agents[agent_id].status = "failed"
         registry._agents[agent_id].error = str(e)
         _send_msg(
-            content=f"ACP-агент {agent_name} ошибка: {e}",
+            content=f"Ошибка агента\n{e}",
             from_agent=agent_id,
             to_agent="orchestrator",
         )
@@ -607,6 +601,12 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Рабочая директория для Qwen.",
                     },
+                    "yolo": {
+                        "type": "boolean",
+                        "description": "Включить режим yolo — пропускать все подтверждения действий. "
+                                       "Позволяет выполнять файловые операции, shell-команды и т.д. без подтверждений.",
+                        "default": False,
+                    },
                 },
                 "required": ["prompts"],
             },
@@ -622,14 +622,25 @@ def _result(data) -> list[TextContent]:
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     """Invoke tool by name."""
+    global _spawned_agents_count
 
     if name == "spawn_agent":
-        info = registry.spawn(
-            name=arguments["name"],
-            command=arguments["command"],
-            args=arguments.get("args", []),
-            cwd=arguments.get("cwd", "."),
-        )
+        if _spawned_agents_count >= _MAX_AGENTS_PER_SESSION:
+            return _result({
+                "error": f"Rate limit: reached maximum {_MAX_AGENTS_PER_SESSION} agents per session. "
+                         f"Set ORCHESTRATOR_MAX_AGENTS env var to change the limit."
+            })
+        _spawned_agents_count += 1
+        try:
+            info = registry.spawn(
+                name=arguments["name"],
+                command=arguments["command"],
+                args=arguments.get("args", []),
+                cwd=arguments.get("cwd", "."),
+            )
+        except ValueError as e:
+            _spawned_agents_count -= 1
+            return _result({"error": str(e)})
         # Start the actual subprocess
         result = await registry.spawn_process(info.id)
         result["name"] = info.name
@@ -753,9 +764,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         cwd = arguments.get("cwd", ".")
         prompt = arguments["description"]
 
-        # Generate agent name from task title (Вариант 3.1)
-        slug = generate_slug(task.title)
-        agent_name = f"qwen-{slug}"
+        # Pick role based on task content
+        role = pick_role(task.title, task.description)
+
+        # Generate agent name from role only
+        agent_name = generate_agent_name(role["role"])
 
         # Try to find a stopped/failed agent to reuse
         existing_agent_id = None
@@ -766,14 +779,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 break
 
         if existing_agent_id:
-            # Restart the existing agent
+            # Reuse — don't count against rate limit
             info = registry._agents[existing_agent_id]
             info.status = "starting"
             info.error = None
             info.current_task = task.id
             spawn_result = await registry.spawn_process(existing_agent_id)
             agent_id = existing_agent_id
-            # Add to queue instead of replacing current task
+            _qwen_agents[agent_id]["role"] = role
             _qwen_agents[agent_id]["queue"].append(task.id)
             _send_msg(
                 content=f"Задача '{task.title}' добавлена в очередь агента {agent_id}",
@@ -782,20 +795,36 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 task_id=task.id,
             )
         else:
-            # Spawn a new Qwen agent
-            info = registry.spawn(
-                name=agent_name,
-                command="qwen",
-                args=["-p", prompt, "-o", "text", "--max-session-turns", "10"],
-                cwd=cwd,
-            )
+            # New agent — check rate limit
+            if _spawned_agents_count >= _MAX_AGENTS_PER_SESSION:
+                task_manager.update_status(
+                    task.id, status="failed",
+                    result=f"Rate limit: maximum {_MAX_AGENTS_PER_SESSION} agents per session",
+                )
+                return _result({
+                    "error": f"Rate limit: reached maximum {_MAX_AGENTS_PER_SESSION} agents per session"
+                })
+            _spawned_agents_count += 1
+            try:
+                info = registry.spawn(
+                    name=agent_name,
+                    command="qwen",
+                    args=["-p", prompt, "-o", "text", "--max-session-turns", "10"],
+                    cwd=cwd,
+                    role=role,
+                )
+            except ValueError as e:
+                _spawned_agents_count -= 1
+                task_manager.update_status(task.id, status="failed", result=str(e))
+                return _result({"error": str(e)})
             spawn_result = await registry.spawn_process(info.id)
             agent_id = info.id
 
-            # Track as Qwen agent with queue support
+            # Track as Qwen agent with queue support and role
             _qwen_agents[agent_id] = {
                 "task_id": task.id,
                 "agent_name": agent_name,
+                "role": role,
                 "queue": []  # Queue of additional tasks
             }
 
@@ -896,19 +925,34 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     elif name == "run_qwen_acp_task":
         prompts = arguments["prompts"]
         cwd = arguments.get("cwd", ".")
+        yolo = arguments.get("yolo", False)
 
-        # Generate agent name from first prompt (Вариант 3.1)
-        slug = generate_slug(prompts[0])
-        agent_name = f"qwen-acp-{slug}"
+        # Check rate limit
+        if _spawned_agents_count >= _MAX_AGENTS_PER_SESSION:
+            return _result({
+                "error": f"Rate limit: reached maximum {_MAX_AGENTS_PER_SESSION} agents per session"
+            })
+
+        # Pick role based on task content
+        first_prompt = prompts[0]
+        role = pick_role(first_prompt, first_prompt)
+
+        # Generate agent name from role only
+        agent_name = generate_agent_name(role["role"])
 
         # Register a "virtual" agent in registry (no subprocess)
-        agent_info = registry.spawn(
-            name=agent_name,
-            command="qwen",  # not actually launched, ACP client handles it
-            args=["--acp"],
-            cwd=cwd,
-        )
+        try:
+            agent_info = registry.spawn(
+                name=agent_name,
+                command="qwen",  # not actually launched, ACP client handles it
+                args=["--acp"],
+                cwd=cwd,
+                role=role,
+            )
+        except ValueError as e:
+            return _result({"error": str(e)})
         agent_id = agent_info.id
+        _spawned_agents_count += 1
 
         # Create tasks
         task_ids = []
@@ -923,23 +967,25 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         # Mark agent as running (even though it's virtual)
         registry._agents[agent_id].status = "running"
+        registry._agents[agent_id].current_task = task_ids[0]
 
-        # Track as ACP agent
+        # Track as ACP agent with role
         _qwen_agents[agent_id] = {
             "task_id": task_ids[0],
             "agent_name": agent_name,
+            "role": role,
             "queue": task_ids[1:],  # remaining tasks in queue
         }
 
         _send_msg(
-            content=f"ACP-агент запущен: {agent_name}\nЗадач: {len(prompts)}",
+            content=f"Агент запущен: {agent_name} | Задача: {first_prompt[:80]}",
             from_agent="orchestrator",
             to_agent=agent_id,
             task_id=task_ids[0],
         )
 
         # Launch background ACP runner
-        asyncio.create_task(_run_acp_agent(agent_id, agent_name, prompts, task_ids, cwd))
+        asyncio.create_task(_run_acp_agent(agent_id, agent_name, role, prompts, task_ids, cwd, yolo=yolo))
 
         return _result({
             "mode": "acp",

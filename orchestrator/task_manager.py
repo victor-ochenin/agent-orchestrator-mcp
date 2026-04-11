@@ -1,6 +1,7 @@
 """Task manager — persistent JSON storage for tasks."""
 
 import json
+import os
 import time
 import uuid
 from dataclasses import dataclass, asdict, field
@@ -24,7 +25,11 @@ class Task:
 
 
 class TaskManager:
-    """Manages tasks with JSON file persistence."""
+    """Manages tasks with JSON file persistence.
+
+    Uses file locking (msvcrt on Windows, fcntl on Unix) to prevent
+    race conditions when multiple agents update tasks concurrently.
+    """
 
     def __init__(self, state_dir: Optional[Path] = None):
         if state_dir is None:
@@ -35,21 +40,61 @@ class TaskManager:
         self._tasks: dict[str, Task] = {}
         self._load()
 
-    def _load(self):
-        """Load tasks from JSON file."""
-        if self._tasks_file.exists():
+    def _lock_file(self, file_obj, exclusive: bool = True):
+        """Acquire a file lock. Works on Windows (msvcrt) and Unix (fcntl)."""
+        import platform
+        if platform.system() == "Windows":
+            import msvcrt
+            file_obj.seek(0)
             try:
-                data = json.loads(self._tasks_file.read_text("utf-8"))
-                for item in data:
-                    task = Task(**item)
-                    self._tasks[task.id] = task
-            except (json.JSONDecodeError, TypeError):
-                self._tasks = {}
+                msvcrt.locking(file_obj.fileno(), msvcrt.LK_LOCK, 1024 * 1024)
+            except OSError:
+                pass
+        else:
+            import fcntl
+            flag = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+            fcntl.flock(file_obj.fileno(), flag)
+
+    def _unlock_file(self, file_obj):
+        """Release a file lock."""
+        import platform
+        if platform.system() == "Windows":
+            import msvcrt
+            file_obj.seek(0)
+            try:
+                msvcrt.locking(file_obj.fileno(), msvcrt.LK_UNLCK, 1024 * 1024)
+            except OSError:
+                pass
+        else:
+            import fcntl
+            fcntl.flock(file_obj.fileno(), fcntl.LOCK_UN)
+
+    def _load(self):
+        """Load tasks from JSON file with locking."""
+        if self._tasks_file.exists():
+            with open(self._tasks_file, "r", encoding="utf-8") as f:
+                self._lock_file(f, exclusive=False)
+                try:
+                    data = json.loads(f.read())
+                    for item in data:
+                        task = Task(**item)
+                        self._tasks[task.id] = task
+                except (json.JSONDecodeError, TypeError):
+                    self._tasks = {}
+                finally:
+                    self._unlock_file(f)
 
     def _save(self):
-        """Save tasks to JSON file."""
+        """Save tasks to JSON file with locking to prevent race conditions."""
         data = [asdict(t) for t in self._tasks.values()]
-        self._tasks_file.write_text(json.dumps(data, indent=2, ensure_ascii=False), "utf-8")
+        with open(self._tasks_file, "w", encoding="utf-8") as f:
+            self._lock_file(f, exclusive=True)
+            try:
+                f.write(json.dumps(data, indent=2, ensure_ascii=False))
+                f.flush()
+                os.fsync(f.fileno())
+            finally:
+                self._unlock_file(f)
 
     def create(
         self,

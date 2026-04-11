@@ -1,6 +1,7 @@
 """Message bus — file-based communication between agents."""
 
 import json
+import os
 import time
 import uuid
 from dataclasses import dataclass, asdict, field
@@ -21,7 +22,11 @@ class Message:
 
 
 class MessageBus:
-    """File-based message bus for inter-agent communication."""
+    """File-based message bus for inter-agent communication.
+
+    Uses file locking (msvcrt on Windows, fcntl on Unix) to prevent
+    race conditions when multiple agents write messages concurrently.
+    """
 
     def __init__(self, state_dir: Optional[Path] = None):
         if state_dir is None:
@@ -32,21 +37,64 @@ class MessageBus:
         self._messages: list[Message] = []
         self._load()
 
-    def _load(self):
-        """Load messages from file."""
-        if self._messages_file.exists():
+    def _lock_file(self, file_obj, exclusive: bool = True):
+        """Acquire a file lock. Works on Windows (msvcrt) and Unix (fcntl)."""
+        import platform
+        if platform.system() == "Windows":
+            import msvcrt
+            mode = msvcrt.LK_NBLCK if not exclusive else msvcrt.LK_LOCK
+            # msvcrt.locking needs the file position at the start
+            file_obj.seek(0)
+            # Lock the first 1MB — enough for our JSON files
             try:
-                data = json.loads(self._messages_file.read_text("utf-8"))
-                for item in data:
-                    msg = Message(**item)
-                    self._messages.append(msg)
-            except (json.JSONDecodeError, TypeError):
-                self._messages = []
+                msvcrt.locking(file_obj.fileno(), msvcrt.LK_LOCK, 1024 * 1024)
+            except OSError:
+                pass  # Best-effort locking
+        else:
+            import fcntl
+            flag = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+            fcntl.flock(file_obj.fileno(), flag)
+
+    def _unlock_file(self, file_obj):
+        """Release a file lock."""
+        import platform
+        if platform.system() == "Windows":
+            import msvcrt
+            file_obj.seek(0)
+            try:
+                msvcrt.locking(file_obj.fileno(), msvcrt.LK_UNLCK, 1024 * 1024)
+            except OSError:
+                pass
+        else:
+            import fcntl
+            fcntl.flock(file_obj.fileno(), fcntl.LOCK_UN)
+
+    def _load(self):
+        """Load messages from file with locking."""
+        if self._messages_file.exists():
+            with open(self._messages_file, "r", encoding="utf-8") as f:
+                self._lock_file(f, exclusive=False)
+                try:
+                    data = json.loads(f.read())
+                    for item in data:
+                        msg = Message(**item)
+                        self._messages.append(msg)
+                except (json.JSONDecodeError, TypeError):
+                    self._messages = []
+                finally:
+                    self._unlock_file(f)
 
     def _save(self):
-        """Save messages to file."""
+        """Save messages to file with locking to prevent race conditions."""
         data = [asdict(m) for m in self._messages]
-        self._messages_file.write_text(json.dumps(data, indent=2, ensure_ascii=False), "utf-8")
+        with open(self._messages_file, "w", encoding="utf-8") as f:
+            self._lock_file(f, exclusive=True)
+            try:
+                f.write(json.dumps(data, indent=2, ensure_ascii=False))
+                f.flush()
+                os.fsync(f.fileno())
+            finally:
+                self._unlock_file(f)
 
     def send(
         self,

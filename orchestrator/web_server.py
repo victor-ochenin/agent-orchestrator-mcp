@@ -71,9 +71,25 @@ class DashboardAPI(SimpleHTTPRequestHandler):
         elif self.path == "/api/messages/clear":
             result = self._clear_messages()
             self._json_response(result)
+        elif self.path == "/api/messages/clear/orchestrator":
+            result = self._clear_orchestrator_messages()
+            self._json_response(result)
         elif self.path == "/api/tasks/update_status":
             result = self._update_task_status(data)
             self._json_response(result)
+        elif self.path.startswith("/api/agents/"):
+            # /api/agents/<agent_id>/stop
+            parts = self.path.split("/")
+            if len(parts) >= 4 and parts[-1] == "stop":
+                agent_id = parts[-2]
+                result = self._stop_agent(agent_id)
+                self._json_response(result)
+            elif len(parts) >= 4 and parts[-1] == "delete":
+                agent_id = parts[-2]
+                result = self._delete_agent(agent_id)
+                self._json_response(result)
+            else:
+                self._json_response({"error": "Not found"}, 404)
         else:
             self._json_response({"error": "Not found"}, 404)
 
@@ -104,7 +120,24 @@ class DashboardAPI(SimpleHTTPRequestHandler):
 
     def _get_agents(self):
         if self.registry:
-            return self.registry.list_agents()
+            agents = self.registry.list_agents()
+            # Enrich Qwen agents with task info and queue
+            try:
+                import orchestrator.server as srv
+                for a in agents:
+                    qwen_data = srv._qwen_agents.get(a["id"])
+                    if qwen_data:
+                        a["task_id"] = qwen_data.get("task_id")
+                        a["queue"] = qwen_data.get("queue", [])
+                        a["is_qwen"] = True
+                        a["is_acp"] = True
+                    # If task_id not from qwen_agents, use current_task from registry
+                    if not a.get("task_id"):
+                        a["task_id"] = a.get("current_task")
+                    # Role is already in agent info from registry
+            except Exception:
+                pass
+            return agents
         return []
 
     def _get_tasks(self):
@@ -158,6 +191,60 @@ class DashboardAPI(SimpleHTTPRequestHandler):
             self.message_bus._messages.clear()
             self.message_bus._save()
         return {"ok": True, "cleared": "messages"}
+
+    def _clear_orchestrator_messages(self):
+        """Clear only orchestrator messages, keeping agent messages."""
+        msgs_file = STATE_DIR / "messages.json"
+        all_msgs = _read_json(msgs_file)
+        # Filter out messages from/to orchestrator
+        agent_msgs = [
+            msg for msg in all_msgs
+            if msg.get("from_agent") != "orchestrator" and msg.get("from_agent") is not None
+        ]
+        _write_json(msgs_file, agent_msgs)
+        # Also update in-memory message bus
+        if self.message_bus:
+            self.message_bus._messages = [
+                m for m in self.message_bus._messages
+                if m.from_agent != "orchestrator" and m.from_agent is not None
+            ]
+            self.message_bus._save()
+        return {"ok": True, "cleared": "orchestrator_messages", "remaining": len(agent_msgs)}
+
+    def _stop_agent(self, agent_id: str):
+        """Stop a running agent."""
+        if self.registry:
+            import asyncio
+            loop = asyncio.new_event_loop()
+            try:
+                result = loop.run_until_complete(self.registry.stop(agent_id))
+                return result
+            finally:
+                loop.close()
+        return {"error": "Registry not available"}
+
+    def _delete_agent(self, agent_id: str):
+        """Stop agent and remove from registry."""
+        if self.registry:
+            import asyncio
+            loop = asyncio.new_event_loop()
+            try:
+                # Stop the agent first
+                loop.run_until_complete(self.registry.stop(agent_id))
+                # Remove from registry
+                self.registry._agents.pop(agent_id, None)
+                self.registry._processes.pop(agent_id, None)
+                self.registry._output_buffers.pop(agent_id, None)
+                # Also remove from Qwen agents tracking
+                try:
+                    import orchestrator.server as srv
+                    srv._qwen_agents.pop(agent_id, None)
+                except Exception:
+                    pass
+                return {"ok": True, "deleted": agent_id}
+            finally:
+                loop.close()
+        return {"error": "Registry not available"}
 
     def _update_task_status(self, data):
         tasks_file = STATE_DIR / "tasks.json"
