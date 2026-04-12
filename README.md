@@ -127,9 +127,6 @@ pip install -e .
 | Инструмент | Описание |
 |---|---|
 | `list_agents` | Список всех агентов с статусами |
-| `stop_agent` | Остановить агента |
-| `get_agent_output` | Получить вывод агента (stdout/stderr) |
-| `send_to_agent` | Отправить текст на stdin агента |
 | `list_persistent_agents` | Список активных сессий агентов |
 | `stop_persistent_agent` | Остановить сессию агента (завершить ACP-сессию и subprocess) |
 
@@ -343,9 +340,6 @@ Add the server to your MCP client's configuration (e.g. Qwen Code's `settings.js
 | Tool | Description |
 |---|---|
 | `list_agents` | List all agents with statuses |
-| `stop_agent` | Stop an agent |
-| `get_agent_output` | Get agent output (stdout/stderr) |
-| `send_to_agent` | Send text to agent's stdin |
 | `list_persistent_agents` | List active agent sessions |
 | `stop_persistent_agent` | Stop an agent session (terminate ACP session and subprocess) |
 

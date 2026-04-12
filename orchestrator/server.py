@@ -81,108 +81,6 @@ def _broadcast_msg(content: str, from_agent: Optional[str] = None, task_id: Opti
     )
 
 
-async def _run_acp_agent(agent_id: str, agent_name: str, role: dict, prompts: list[str], task_ids: list[str], cwd: str, yolo: bool = True):
-    """Background task: run ACP client as a virtual agent, processing tasks sequentially.
-    NOTE: yolo=True по умолчанию — агент пропускает все подтверждения."""
-    client = ACPClient(cwd=cwd, yolo=yolo)
-    try:
-        # Start ACP session
-        agent_info_resp = await client.start()
-        session_id = await client.new_session(cwd=cwd)
-
-        # Process each task
-        for i, prompt_text in enumerate(prompts):
-            task_id = task_ids[i]
-            task_manager.update_status(task_id, status="running")
-            registry.update_task(agent_id, task_id)
-
-            # Orchestrator sends the task to agent via message bus
-            _send_msg(
-                content=prompt_text,
-                from_agent="orchestrator",
-                to_agent=agent_id,
-                task_id=task_id,
-            )
-
-            result = await client.run_task(prompt_text, session_id=session_id, request_id=10 + i)
-
-            answer = result.get("answer", "")
-            stop_reason = result.get("stop_reason", "")
-
-            # Check if the result looks like a pending confirmation
-            # (yolo should auto-allow, but some agents still pause)
-            confirmation_keywords = [
-                "продолжить", "confirm", "are you sure", "you sure",
-                "proceed", "permission", "разрешен", "подтвержд",
-                "permanently", "удалить", "delete", "уничтож",
-            ]
-            is_pending_confirmation = any(
-                kw in answer.lower() for kw in confirmation_keywords
-            )
-
-            if is_pending_confirmation and stop_reason:
-                # Agent is waiting for confirmation — send "yes" and retry
-                _send_msg(
-                    content=f"Запрос подтверждения — отправляю 'да'",
-                    from_agent=agent_id,
-                    to_agent="orchestrator",
-                    task_id=task_id,
-                )
-                result = await client.run_task("yes", session_id=session_id, request_id=10 + i + 100)
-                answer = result.get("answer", "")
-                stop_reason = result.get("stop_reason", "")
-
-            # Update task
-            task_manager.update_status(
-                task_id,
-                status="completed" if stop_reason else "failed",
-                result=answer if answer else f"(stop: {stop_reason})",
-            )
-
-            # Send result — only the answer text, no "task completed" prefix
-            if answer:
-                _send_msg(
-                    content=answer,
-                    from_agent=agent_id,
-                    to_agent="orchestrator",
-                    task_id=task_id,
-                )
-            else:
-                _send_msg(
-                    content=f"Задача не выполнена | stop: {stop_reason or 'N/A'}",
-                    from_agent=agent_id,
-                    to_agent="orchestrator",
-                    task_id=task_id,
-                )
-
-        # All tasks done
-        registry._agents[agent_id].status = "stopped"
-        _send_msg(
-            content="Агент завершил задачу",
-            from_agent=agent_id,
-            to_agent="orchestrator",
-        )
-
-    except Exception as e:
-        # Mark remaining tasks as failed
-        for task_id in task_ids:
-            t = task_manager.get(task_id)
-            if t and t.get("status") == "running":
-                task_manager.update_status(task_id, status="failed", result=str(e))
-
-        registry._agents[agent_id].status = "failed"
-        registry._agents[agent_id].error = str(e)
-        _send_msg(
-            content=f"Ошибка агента\n{e}",
-            from_agent=agent_id,
-            to_agent="orchestrator",
-        )
-    finally:
-        await client.stop()
-        # Remove from ACP agents tracking
-        _acp_agents.pop(agent_id, None)
-
-
 async def _run_acp_agent_persistent(agent_id: str, agent_name: str, prompts: list[str], task_ids: list[str], session: PersistentACPSession):
     """Run tasks sequentially in an existing persistent session without restarting.
 
@@ -290,57 +188,6 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {},
-            },
-        ),
-        Tool(
-            name="stop_agent",
-            description="Остановить работающего агента.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "agent_id": {
-                        "type": "string",
-                        "description": "ID агента для остановки.",
-                    },
-                },
-                "required": ["agent_id"],
-            },
-        ),
-        Tool(
-            name="get_agent_output",
-            description="Получить вывод subprocess агента (stdout/stderr).",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "agent_id": {
-                        "type": "string",
-                        "description": "ID агента.",
-                    },
-                    "last_n": {
-                        "type": "integer",
-                        "description": "Количество последних строк (по умолчанию 50).",
-                        "default": 50,
-                    },
-                },
-                "required": ["agent_id"],
-            },
-        ),
-        Tool(
-            name="send_to_agent",
-            description="Отправить текст на stdin работающего агента.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "agent_id": {
-                        "type": "string",
-                        "description": "ID агента.",
-                    },
-                    "text": {
-                        "type": "string",
-                        "description": "Текст для отправки.",
-                    },
-                },
-                "required": ["agent_id", "text"],
             },
         ),
         Tool(
@@ -633,21 +480,6 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
     if name == "list_agents":
         return _result(registry.list_agents())
-
-    elif name == "stop_agent":
-        result = await registry.stop(arguments["agent_id"])
-        return _result(result)
-
-    elif name == "get_agent_output":
-        result = registry.get_output(
-            arguments["agent_id"],
-            last_n=arguments.get("last_n", 50),
-        )
-        return _result(result)
-
-    elif name == "send_to_agent":
-        result = await registry.send_input(arguments["agent_id"], arguments["text"])
-        return _result(result)
 
     elif name == "create_task":
         task = task_manager.create(
