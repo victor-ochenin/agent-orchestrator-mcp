@@ -14,7 +14,7 @@ from orchestrator.task_manager import TaskManager
 from orchestrator.message_bus import MessageBus
 from orchestrator.web_server import start_dashboard_server
 from orchestrator.utils import pick_role, generate_agent_name
-from orchestrator.acp_client import ACPClient
+from orchestrator.acp_client import ACPClient, PersistentACPSession
 
 app = Server("agent-orchestrator-mcp")
 
@@ -26,6 +26,10 @@ message_bus = MessageBus()
 # Track ACP agents (virtual agents managed by _run_acp_agent)
 # Format: agent_id -> {"agent_name": str, "role": dict}
 _acp_agents: dict[str, dict] = {}
+
+# Persistent sessions that survive across multiple run_task calls
+# Format: agent_id -> PersistentACPSession
+_persistent_sessions: dict[str, PersistentACPSession] = {}
 
 # Rate limiting: track total agents spawned per session
 _MAX_AGENTS_PER_SESSION = int(os.environ.get("ORCHESTRATOR_MAX_AGENTS", 5))
@@ -94,7 +98,7 @@ async def _run_acp_agent(agent_id: str, agent_name: str, role: dict, prompts: li
 
             # Orchestrator sends the task to agent via message bus
             _send_msg(
-                content=f"Задача {i+1}/{len(prompts)}: {prompt_text}",
+                content=prompt_text,
                 from_agent="orchestrator",
                 to_agent=agent_id,
                 task_id=task_id,
@@ -177,6 +181,103 @@ async def _run_acp_agent(agent_id: str, agent_name: str, role: dict, prompts: li
         await client.stop()
         # Remove from ACP agents tracking
         _acp_agents.pop(agent_id, None)
+
+
+async def _run_acp_agent_persistent(agent_id: str, agent_name: str, prompts: list[str], task_ids: list[str], session: PersistentACPSession):
+    """Run tasks sequentially in an existing persistent session without restarting.
+
+    Unlike _run_acp_agent, this does NOT create/destroy the subprocess.
+    It reuses the existing session and keeps the agent alive after tasks complete.
+    """
+    try:
+        # Ensure session is started
+        if not session.is_alive:
+            await session.start()
+
+        # Process each task
+        for i, prompt_text in enumerate(prompts):
+            task_id = task_ids[i]
+            task_manager.update_status(task_id, status="running")
+            registry.update_task(agent_id, task_id)
+
+            _send_msg(
+                content=prompt_text,
+                from_agent="orchestrator",
+                to_agent=agent_id,
+                task_id=task_id,
+            )
+
+            result = await session.run_task(prompt_text)
+
+            answer = result.get("answer", "")
+            stop_reason = result.get("stop_reason", "")
+
+            # Check for pending confirmation
+            confirmation_keywords = [
+                "продолжить", "confirm", "are you sure", "you sure",
+                "proceed", "permission", "разрешен", "подтвержд",
+                "permanently", "удалить", "delete", "уничтож",
+            ]
+            is_pending_confirmation = any(
+                kw in answer.lower() for kw in confirmation_keywords
+            )
+
+            if is_pending_confirmation and stop_reason:
+                _send_msg(
+                    content=f"Запрос подтверждения — отправляю 'да'",
+                    from_agent=agent_id,
+                    to_agent="orchestrator",
+                    task_id=task_id,
+                )
+                result = await session.run_task("yes")
+                answer = result.get("answer", "")
+                stop_reason = result.get("stop_reason", "")
+
+            task_manager.update_status(
+                task_id,
+                status="completed" if stop_reason else "failed",
+                result=answer if answer else f"(stop: {stop_reason})",
+            )
+
+            if answer:
+                _send_msg(
+                    content=answer,
+                    from_agent=agent_id,
+                    to_agent="orchestrator",
+                    task_id=task_id,
+                )
+            else:
+                _send_msg(
+                    content=f"Задача не выполнена | stop: {stop_reason or 'N/A'}",
+                    from_agent=agent_id,
+                    to_agent="orchestrator",
+                    task_id=task_id,
+                )
+
+        # All tasks done — agent goes IDLE (stays alive, waiting for next task)
+        if agent_id in registry._agents:
+            registry._agents[agent_id].status = "idle"
+        _send_msg(
+            content="Задачи выполнены. Агент ожидает следующие задачи.",
+            from_agent=agent_id,
+            to_agent="orchestrator",
+        )
+
+    except Exception as e:
+        for task_id in task_ids:
+            t = task_manager.get(task_id)
+            if t and t.get("status") == "running":
+                task_manager.update_status(task_id, status="failed", result=str(e))
+
+        registry._agents[agent_id].status = "failed"
+        registry._agents[agent_id].error = str(e)
+        _send_msg(
+            content=f"Ошибка агента\n{e}",
+            from_agent=agent_id,
+            to_agent="orchestrator",
+        )
+        # Remove dead session from tracking
+        _persistent_sessions.pop(agent_id, None)
 
 
 @app.list_tools()
@@ -459,6 +560,12 @@ async def list_tools() -> list[Tool]:
                                        "По умолчанию всегда True.",
                         "default": True,
                     },
+                    "mcp_servers": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": "Список конфигураций MCP-серверов для подключения агента. "
+                                       "Каждый элемент — объект с полями name, command, args, cwd.",
+                    },
                 },
                 "required": ["prompts"],
             },
@@ -484,6 +591,28 @@ async def list_tools() -> list[Tool]:
             name="get_workspace",
             description="Получить текущую рабочую директорию оркестратора. "
                         "Если не установлена, вернётся директория проекта оркестратора.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="stop_persistent_agent",
+            description="Остановить сессию агента (завершить ACP-сессию и subprocess).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "agent_id": {
+                        "type": "string",
+                        "description": "ID агента для остановки.",
+                    },
+                },
+                "required": ["agent_id"],
+            },
+        ),
+        Tool(
+            name="list_persistent_agents",
+            description="Список активных сессий агентов.",
             inputSchema={
                 "type": "object",
                 "properties": {},
@@ -602,7 +731,12 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         message_bus._save()
         # Also clear ACP agent tracking
         _acp_agents.clear()
-        return _result({"ok": True, "cleared": ["tasks", "messages", "agents"]})
+        # And clear persistent sessions
+        for sess in _persistent_sessions.values():
+            if sess.is_alive:
+                asyncio.create_task(sess.stop())
+        _persistent_sessions.clear()
+        return _result({"ok": True, "cleared": ["tasks", "messages", "agents", "persistent_sessions"]})
 
     elif name == "run_task":
         prompts = arguments["prompts"]
@@ -615,8 +749,57 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             else:
                 cwd = "."
         yolo = arguments.get("yolo", True)
+        mcp_servers = arguments.get("mcp_servers")
 
-        # Check rate limit
+        # Check if we should reuse an existing persistent agent
+        existing_agent_id = arguments.get("agent_id")
+        if existing_agent_id:
+            session = _persistent_sessions.get(existing_agent_id)
+            if not session:
+                return _result({
+                    "error": f"Persistent agent '{existing_agent_id}' not found. Create a new one first or use list_persistent_agents to see available agents."
+                })
+
+            # Reuse existing session — create new tasks, run in same session
+            task_ids = []
+            for prompt_text in prompts:
+                task = task_manager.create(
+                    title=prompt_text,
+                    description=prompt_text,
+                    assigned_to=existing_agent_id,
+                    priority="normal",
+                )
+                task_ids.append(task.id)
+
+            # Update agent status in registry
+            registry._agents[existing_agent_id].current_task = task_ids[0]
+            registry._agents[existing_agent_id].status = "running"
+
+            agent_name = _acp_agents.get(existing_agent_id, {}).get("agent_name", "agent")
+
+            _send_msg(
+                content=f"Агент {agent_name} ({existing_agent_id}) получил задачу: {prompts[0]}",
+                from_agent="orchestrator",
+                to_agent=existing_agent_id,
+                task_id=task_ids[0],
+            )
+
+            asyncio.create_task(_run_acp_agent_persistent(
+                existing_agent_id,
+                agent_name,
+                prompts, task_ids, session,
+            ))
+
+            return _result({
+                "mode": "acp-persistent-reuse",
+                "agent_id": existing_agent_id,
+                "agent_name": agent_name,
+                "tasks": task_ids,
+                "status": "running",
+                "cwd": cwd,
+            })
+
+        # No agent_id — check rate limit and create a NEW persistent agent
         if _spawned_agents_count >= _MAX_AGENTS_PER_SESSION:
             return _result({
                 "error": f"Rate limit: reached maximum {_MAX_AGENTS_PER_SESSION} agents per session"
@@ -641,7 +824,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         except ValueError as e:
             return _result({"error": str(e)})
         agent_id = agent_info.id
-        _spawned_agents_count += 1
+
+        # Create a persistent session
+        session = PersistentACPSession(agent_id=agent_id, cwd=cwd, yolo=yolo, mcp_servers=mcp_servers)
+        _persistent_sessions[agent_id] = session
 
         # Create tasks
         task_ids = []
@@ -654,7 +840,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             )
             task_ids.append(task.id)
 
-        # Mark agent as running (even though it's virtual)
+        # Mark agent as running
         registry._agents[agent_id].status = "running"
         registry._agents[agent_id].current_task = task_ids[0]
 
@@ -663,6 +849,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             "agent_name": agent_name,
             "role": role,
         }
+        _spawned_agents_count += 1
 
         _send_msg(
             content=f"Агент запущен: {agent_name} | Задача: {first_prompt}",
@@ -671,16 +858,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             task_id=task_ids[0],
         )
 
-        # Launch background ACP runner
-        asyncio.create_task(_run_acp_agent(agent_id, agent_name, role, prompts, task_ids, cwd, yolo=yolo))
+        # Launch background persistent ACP runner
+        asyncio.create_task(_run_acp_agent_persistent(agent_id, agent_name, prompts, task_ids, session))
 
         return _result({
-            "mode": "acp",
+            "mode": "acp-persistent",
             "agent_id": agent_id,
             "agent_name": agent_name,
             "tasks": task_ids,
             "status": "running",
-            "cwd": agent_info.cwd,
+            "cwd": cwd,
         })
 
     elif name == "set_workspace":
@@ -703,6 +890,36 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             # Return the default (orchestrator project directory)
             from orchestrator.registry import _DEFAULT_CWD_ROOT
             return _result({"workspace": str(_DEFAULT_CWD_ROOT), "default": True})
+
+    elif name == "stop_persistent_agent":
+        agent_id = arguments["agent_id"]
+        session = _persistent_sessions.pop(agent_id, None)
+        if session:
+            await session.stop()
+            if agent_id in registry._agents:
+                registry._agents[agent_id].status = "stopped"
+            _send_msg(
+                content=f"Агент {agent_id} остановлен",
+                from_agent="orchestrator",
+            )
+            return _result({"ok": True, "agent_id": agent_id})
+        return _result({"error": f"Persistent agent '{agent_id}' not found"})
+
+    elif name == "list_persistent_agents":
+        result = []
+        for aid, sess in _persistent_sessions.items():
+            agent_data = _acp_agents.get(aid, {})
+            result.append({
+                "agent_id": aid,
+                "agent_name": agent_data.get("agent_name", "unknown"),
+                "is_alive": sess.is_alive,
+                "session_id": sess.session_id,
+                "cwd": sess.cwd,
+            })
+        return _result({
+            "persistent_agents": result,
+            "total": len(result),
+        })
 
     else:
         return _result({"error": f"Unknown tool: {name}"})

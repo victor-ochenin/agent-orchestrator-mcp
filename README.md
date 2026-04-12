@@ -120,7 +120,7 @@ pip install -e .
 
 | Инструмент | Описание |
 |---|---|
-| `run_task` | Запустить одну или несколько задач через ACP в одной сессии |
+| `run_task` | Запустить одну или несколько задач через ACP в одной сессии. Поддерживает переиспользование агента и подключение внешних MCP-серверов |
 
 #### Управление агентами
 
@@ -130,6 +130,8 @@ pip install -e .
 | `stop_agent` | Остановить агента |
 | `get_agent_output` | Получить вывод агента (stdout/stderr) |
 | `send_to_agent` | Отправить текст на stdin агента |
+| `list_persistent_agents` | Список активных сессий агентов |
+| `stop_persistent_agent` | Остановить сессию агента (завершить ACP-сессию и subprocess) |
 
 #### Управление задачами
 
@@ -180,7 +182,7 @@ pip install -e .
 #### Примеры использования
 
 ```
-# Запустить задачу через ACP
+# Запустить задачу через ACP (создаётся новый агент)
 run_task(prompts=["Реализовать CRUD API для пользователей"])
 
 # Запустить несколько задач в одной сессии
@@ -193,8 +195,36 @@ run_task(prompts=[
 # Запустить задачу в конкретной директории
 run_task(prompts=["Проанализировать код"], cwd="C:\\project")
 
+# Переиспользовать существующего агента (сохраняет контекст сессии)
+# Сначала создаём агента и запоминаем agent_id из ответа
+run_task(prompts=["Создать файлы проекта"])
+# → ответ: {"agent_id": "abc12345", ...}
+
+# Затем используем того же агента для следующей задачи
+run_task(agent_id="abc12345", prompts=["Добавить документацию"])
+
+# Подключить внешние MCP-серверы к агенту
+run_task(
+  prompts=["Найди все конфиги в проекте"],
+  mcp_servers=[{
+    "name": "config-finder",
+    "command": "python",
+    "args": ["-m", "config_finder_mcp.server"],
+    "cwd": "C:\\project\\config-finder-mcp",
+    "type": "stdio",
+    "env": [],
+    "headers": []
+  }]
+)
+
 # Посмотреть всех агентов
 list_agents()
+
+# Посмотреть активные сессии
+list_persistent_agents()
+
+# Остановить сессию агента
+stop_persistent_agent(agent_id="abc12345")
 
 # Создать задачу вручную
 create_task(title="Реализовать API", description="Создать CRUD endpoints", priority="high")
@@ -306,7 +336,7 @@ Add the server to your MCP client's configuration (e.g. Qwen Code's `settings.js
 
 | Tool | Description |
 |---|---|
-| `run_task` | Run one or more tasks via ACP in a single session |
+| `run_task` | Run one or more tasks via ACP in a single session. Supports agent reuse and external MCP servers |
 
 #### Agent Management
 
@@ -316,6 +346,8 @@ Add the server to your MCP client's configuration (e.g. Qwen Code's `settings.js
 | `stop_agent` | Stop an agent |
 | `get_agent_output` | Get agent output (stdout/stderr) |
 | `send_to_agent` | Send text to agent's stdin |
+| `list_persistent_agents` | List active agent sessions |
+| `stop_persistent_agent` | Stop an agent session (terminate ACP session and subprocess) |
 
 #### Task Management
 
@@ -366,7 +398,7 @@ The orchestrator launches a built-in web dashboard for real-time monitoring.
 #### Usage examples
 
 ```
-# Run a task via ACP
+# Run a task via ACP (creates a new agent)
 run_task(prompts=["Implement CRUD API for users"])
 
 # Run multiple tasks in one session
@@ -379,8 +411,36 @@ run_task(prompts=[
 # Run a task in a specific directory
 run_task(prompts=["Analyze code"], cwd="/home/user/project")
 
+# Reuse an existing agent (preserves session context)
+# First, create an agent and note the agent_id from the response
+run_task(prompts=["Create project files"])
+# → response: {"agent_id": "abc12345", ...}
+
+# Then reuse the same agent for the next task
+run_task(agent_id="abc12345", prompts=["Add documentation"])
+
+# Connect external MCP servers to the agent
+run_task(
+  prompts=["Find all config files in the project"],
+  mcp_servers=[{
+    "name": "config-finder",
+    "command": "python",
+    "args": ["-m", "config_finder_mcp.server"],
+    "cwd": "/home/project/config-finder-mcp",
+    "type": "stdio",
+    "env": [],
+    "headers": []
+  }]
+)
+
 # List all agents
 list_agents()
+
+# List active persistent sessions
+list_persistent_agents()
+
+# Stop an agent session
+stop_persistent_agent(agent_id="abc12345")
 
 # Create a task manually
 create_task(title="Implement API", description="Create CRUD endpoints", priority="high")

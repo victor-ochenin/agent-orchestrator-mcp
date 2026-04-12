@@ -12,8 +12,51 @@ from typing import Optional
 
 # Default allowed cwd root — agents cannot escape this directory tree.
 # Can be overridden via ORCHESTRATOR_ALLOWED_CWD_ROOT env var.
+# IMPORTANT: This is updated dynamically when workspace is set via set_workspace_cwd().
+# Initially set to current dir, but will be expanded to workspace parent.
 _DEFAULT_CWD_ROOT = Path(os.getcwd()).resolve()
 _ALLOWED_CWD_ROOT = Path(os.environ.get("ORCHESTRATOR_ALLOWED_CWD_ROOT", str(_DEFAULT_CWD_ROOT))).resolve()
+
+# Workspace cwd — the directory where the orchestrator was launched from (set by MCP client).
+# Agents will use this as their default cwd instead of the orchestrator project directory.
+_WORKSPACE_CWD: Optional[Path] = None
+
+
+def set_workspace_cwd(workspace_path: str) -> Path:
+    """Set the workspace working directory for spawned agents.
+
+    This allows agents to work in the directory where the orchestrator
+    was launched from, rather than the orchestrator project directory.
+
+    The allowed cwd root is automatically set to the workspace's parent
+    directory, allowing agents to work in any sibling directory.
+
+    Args:
+        workspace_path: Absolute path to the workspace directory.
+
+    Returns:
+        Resolved workspace path.
+
+    Raises:
+        ValueError: If the path does not exist.
+    """
+    global _WORKSPACE_CWD, _ALLOWED_CWD_ROOT
+    resolved = Path(workspace_path).resolve()
+
+    if not resolved.exists():
+        raise ValueError(f"Workspace directory does not exist: {workspace_path}")
+
+    # Expand allowed cwd root to the workspace's parent directory
+    # This allows agents to work in the workspace and any sibling directories
+    _ALLOWED_CWD_ROOT = resolved.parent if resolved.parent != resolved else resolved
+
+    _WORKSPACE_CWD = resolved
+    return resolved
+
+
+def get_workspace_cwd() -> Optional[Path]:
+    """Get the current workspace cwd, or None if not set."""
+    return _WORKSPACE_CWD
 
 
 def validate_cwd(cwd: str) -> str:

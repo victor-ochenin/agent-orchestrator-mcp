@@ -228,22 +228,6 @@ class ACPClient:
             "messages_count": msg_count,
         }
 
-    async def run_tasks(self, tasks: list[str], session_id: Optional[str] = None) -> list[dict]:
-        """Run multiple tasks sequentially in the same session.
-
-        Args:
-            tasks: List of prompt strings
-            session_id: Session ID (uses current if None)
-
-        Returns:
-            List of result dicts (same as run_task)
-        """
-        results = []
-        for i, task_text in enumerate(tasks):
-            result = await self.run_task(task_text, session_id=session_id, request_id=10 + i)
-            results.append(result)
-        return results
-
     async def stop(self):
         """Terminate the Qwen subprocess."""
         if self._process and self._process.returncode is None:
@@ -323,3 +307,61 @@ class ACPClient:
 
     async def __aexit__(self, *args):
         await self.stop()
+
+
+class PersistentACPSession:
+    """Long-lived ACP session that survives across multiple run_task calls.
+
+    Unlike ACPClient which is designed for single-use (start -> task -> stop),
+    this class keeps the subprocess alive and allows reusing the same agent
+    context for multiple sequential task calls.
+    """
+
+    def __init__(self, agent_id: str, cwd: str, yolo: bool = False, mcp_servers: Optional[list] = None):
+        self.agent_id = agent_id
+        self.client = ACPClient(cwd=cwd, yolo=yolo)
+        self.cwd = cwd
+        self.yolo = yolo
+        self.mcp_servers = mcp_servers or []
+        self.session_id: Optional[str] = None
+        self._started = False
+        self._request_counter = 100  # Unique request IDs across calls
+
+    @property
+    def is_alive(self) -> bool:
+        return self._started and self.client.is_running
+
+    async def start(self) -> dict:
+        """Initialize ACP and create a session. Idempotent."""
+        if self._started:
+            return {"status": "already_running"}
+
+        agent_info = await self.client.start()
+        self.session_id = await self.client.new_session(cwd=self.cwd, mcp_servers=self.mcp_servers)
+        self._started = True
+        return {"status": "started", "session_id": self.session_id, "agent_info": agent_info}
+
+    async def run_task(
+        self,
+        prompt: str,
+        timeout_per_message: float = 30.0,
+        max_messages: int = 500,
+    ) -> dict:
+        """Run a task using the existing session without restarting."""
+        if not self._started:
+            await self.start()
+
+        self._request_counter += 1
+        return await self.client.run_task(
+            prompt=prompt,
+            session_id=self.session_id,
+            timeout_per_message=timeout_per_message,
+            max_messages=max_messages,
+            request_id=self._request_counter,
+        )
+
+    async def stop(self):
+        """Terminate the subprocess and clean up."""
+        await self.client.stop()
+        self._started = False
+        self.session_id = None

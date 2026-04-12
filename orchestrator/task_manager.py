@@ -186,30 +186,3 @@ class TaskManager:
             "total": len(self._tasks),
             "by_status": counts,
         }
-
-    def get_next_pending(self, exclude_agent: Optional[str] = None) -> Optional[dict]:
-        """Get the next pending task (oldest first), optionally excluding tasks assigned to a specific agent."""
-        pending_tasks = []
-        for task in self._tasks.values():
-            if task.status == "pending":
-                # If exclude_agent is specified, skip tasks assigned to that agent
-                if exclude_agent and task.assigned_to == exclude_agent:
-                    continue
-                pending_tasks.append(asdict(task))
-        
-        # Sort by creation time (oldest first)
-        pending_tasks.sort(key=lambda x: x["created_at"])
-        return pending_tasks[0] if pending_tasks else None
-
-    def reassign_unassigned_pending(self) -> list[dict]:
-        """Reassign all unassigned pending tasks in round-robin fashion to available agents.
-        Returns list of reassigned tasks."""
-        # Get all unassigned pending tasks
-        unassigned = []
-        for task in self._tasks.values():
-            if task.status == "pending" and task.assigned_to is None:
-                unassigned.append(asdict(task))
-        
-        # Sort by creation time (oldest first)
-        unassigned.sort(key=lambda x: x["created_at"])
-        return unassigned
