@@ -93,7 +93,7 @@ pip install -e .
     "agent-orchestrator": {
       "command": "python",
       "args": ["-m", "orchestrator.server"],
-      "cwd": "C:\\Users\\user\\Desktop\\LocalMcp\\agent-orchestrator-mcp"
+      "cwd": "/absolute/path/to/agent-orchestrator-mcp"
     }
   }
 }
@@ -106,7 +106,7 @@ pip install -e .
     "agent-orchestrator": {
       "command": "uv",
       "args": ["run", "-m", "orchestrator.server"],
-      "cwd": "C:\\Users\\user\\Desktop\\LocalMcp\\agent-orchestrator-mcp"
+      "cwd": "/absolute/path/to/agent-orchestrator-mcp"
     }
   }
 }
