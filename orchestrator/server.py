@@ -563,10 +563,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         message_bus._save()
         # Also clear ACP agent tracking
         _acp_agents.clear()
-        # And clear persistent sessions
-        for sess in _persistent_sessions.values():
-            if sess.is_alive:
-                asyncio.create_task(sess.stop())
+        # And clear persistent sessions — stop all in parallel
+        if _persistent_sessions:
+            stop_coroutines = [sess.stop() for sess in _persistent_sessions.values() if sess.is_alive]
+            if stop_coroutines:
+                await asyncio.gather(*stop_coroutines, return_exceptions=True)
         _persistent_sessions.clear()
         return _result({"ok": True, "cleared": ["tasks", "messages", "agents", "persistent_sessions"]})
 
@@ -781,7 +782,12 @@ async def main():
         async with stdio_server() as (read_stream, write_stream):
             await app.run(read_stream, write_stream, app.create_initialization_options())
     finally:
-        # Cleanup on session close
+        # Cleanup on session close — stop all persistent agents in parallel
+        if _persistent_sessions:
+            stop_coroutines = [sess.stop() for sess in _persistent_sessions.values() if sess.is_alive]
+            if stop_coroutines:
+                await asyncio.gather(*stop_coroutines, return_exceptions=True)
+            _persistent_sessions.clear()
         try:
             print("Session ended — clearing tasks and messages", flush=True)
         except (ValueError, OSError):

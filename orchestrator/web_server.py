@@ -47,7 +47,8 @@ class DashboardAPI(SimpleHTTPRequestHandler):
         elif self.path == "/api/summary":
             self._json_response(self._get_summary())
         elif self.path == "/api/stream":
-            self._handle_sse()
+            # SSE removed — return polling endpoint
+            self._json_response({"error": "SSE disabled, use /api/agents, /api/tasks, /api/summary"}, 501)
         else:
             # Serve static files from web/ directory
             if self.path == "/" or self.path == "/index.html":
@@ -100,23 +101,6 @@ class DashboardAPI(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(data, ensure_ascii=False).encode("utf-8"))
 
-    def _handle_sse(self):
-        """Server-Sent Events for real-time updates."""
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Cache-Control", "no-cache")
-        self.end_headers()
-        try:
-            while True:
-                agents = self._get_agents()
-                tasks = self._get_tasks()
-                event = json.dumps({"agents": agents, "tasks": tasks}, ensure_ascii=False)
-                self.wfile.write(f"data: {event}\n\n".encode("utf-8"))
-                self.wfile.flush()
-                time.sleep(2)
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            pass
 
     def _get_agents(self):
         if self.registry:
